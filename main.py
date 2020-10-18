@@ -64,6 +64,28 @@ class Maxout(torch.nn.Module):
         return torch.max(X1, dim=1)[0]
 
 
+class MinMaxout(torch.nn.Module):
+    def __init__(self, width, min_arity, max_arity):
+        super().__init__()
+        self.width = width
+        self.min_arity = min_arity
+        self.max_arity = max_arity
+
+    def forward(self, X):
+        X1 = X.view(self.width, self.min_arity, self.max_arity, X.shape[1])
+        return torch.max(torch.min(X1, dim=1)[0], dim=1)[0]
+
+
+
+class GlobalScaling(torch.nn.Module):
+    def __init__(self, dtype=torch.float32, device=None):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.ones([], dtype=dtype, device=device))
+
+    def forward(self, X):
+        return X * self.scale.view(1, 1)
+
+
 class Scaling(torch.nn.Module):
     def __init__(self, width, dtype=torch.float32, device=None):
         super().__init__()
@@ -77,16 +99,19 @@ class Scaling(torch.nn.Module):
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
+                 min_arity: int,
                  max_arity: int,
                  dtype=torch.float32,
                  device=None):
         super().__init__()
         self.widths = widths
         layers = []
-        layers.append(Scaling(widths[0], dtype=dtype, device=device))
+        # layers.append(Scaling(widths[0], dtype=dtype, device=device))
+        layers.append(GlobalScaling(dtype=dtype, device=device))
         for i in range(len(widths) - 1):
-            layers.append(L1Linear(widths[i], max_arity * widths[i + 1], dtype=dtype, device=device))
-            layers.append(Maxout(widths[i + 1], max_arity))
+            layers.append(L1Linear(widths[i], min_arity * max_arity * widths[i + 1], dtype=dtype, device=device))
+            # layers.append(Maxout(widths[i + 1], max_arity))
+            layers.append(MinMaxout(widths[i + 1], min_arity, max_arity))
         self.sequential = torch.nn.Sequential(*layers)
 
     def forward(self, X):
@@ -109,13 +134,15 @@ def load_data(filename):
 train_X, train_Y = load_data('~/nn/datasets/poker/poker-hand-training-true.data')
 test_X, test_Y = load_data('~/nn/datasets/poker/poker-hand-testing.data')
 
-net = Network(widths=[10, 25, 25, 25, 10],
-              max_arity=2,
+net = Network(widths=[10, 20, 20, 20, 10],
+              min_arity=3,
+              max_arity=1,
               dtype=torch.float32,
               device=torch.device('cpu'))
 
-optimizer = torch.optim.Adam(net.parameters(), lr=0.015, betas=(0.8, 0.8))
-# optimizer = torch.optim.Adam(net.parameters(), lr=0.01, betas=(0.8, 0.8))
+# optimizer = torch.optim.Adam(net.parameters(), lr=0.015, betas=(0.8, 0.8))
+# optimizer = torch.optim.Adam(net.parameters(), lr=0.012, betas=(0.75, 0.75))
+optimizer = torch.optim.Adam(net.parameters(), lr=0.02, betas=(0.75, 0.75))
 print(optimizer)
 
 average_params = [torch.zeros_like(p) for p in net.parameters()]
