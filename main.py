@@ -77,33 +77,6 @@ class MinMaxout(torch.nn.Module):
 
 
 
-class GlobalScaling(torch.nn.Module):
-    def __init__(self, init_scale, dtype=torch.float32, device=None):
-        super().__init__()
-        self.scale = torch.nn.Parameter(torch.full([], init_scale, dtype=dtype, device=device))
-
-    def forward(self, X):
-        return X * self.scale.view(1, 1)
-
-
-class Scaling(torch.nn.Module):
-    def __init__(self, width, dtype=torch.float32, device=None):
-        super().__init__()
-        self.width = width
-        self.scales = torch.nn.Parameter(torch.ones([width], dtype=dtype, device=device))
-
-    def forward(self, X):
-        return X * self.scales.view(-1, 1)
-
-
-class ReLU(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, X):
-        return torch.clamp(X, min=0.0)
-
-
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
@@ -117,16 +90,14 @@ class Network(torch.nn.Module):
         self.depth = len(widths) - 1
         self.lin_layers = torch.nn.ModuleList([])
         self.act_layers = torch.nn.ModuleList([])
-        self.scaling = GlobalScaling(init_scale, dtype=dtype, device=device)
+        self.scale = torch.nn.Parameter(torch.full([], init_scale, dtype=dtype, device=device))
         for i in range(self.depth):
             self.lin_layers.append(L1Linear(widths[i], min_arity * max_arity * widths[i + 1], dtype=dtype, device=device))
             self.act_layers.append(MinMaxout(widths[i + 1], min_arity, max_arity))
-            # self.lin_layers.append(L1Linear(widths[i], widths[i + 1], dtype=dtype, device=device))
-            # self.act_layers.append(ReLU())
 
     def forward(self, X):
         for i in range(self.depth):
-            X = self.scaling(X)
+            X = X * self.scale
             X = self.lin_layers[i](X)
             X = self.act_layers[i](X)
         return X
@@ -162,7 +133,7 @@ net = Network(widths=[10] + 4 * [20] + [10],
 
 optimizer = torch.optim.Adam(net.parameters(), lr=0.015, betas=(0.5, 0.5))
 print(optimizer)
-print("init_scale: {}".format(net.scaling.scale))
+print("init_scale: {}".format(net.scale))
 
 average_params = [torch.zeros_like(p) for p in net.parameters()]
 average_param_beta = 0.995
@@ -178,9 +149,6 @@ for _ in range(1, 50001):
     P = net(train_X)
     train_loss = compute_loss(P, train_Y)
     train_loss.backward()
-    # lr = np.interp(epoch, [1, 5000], [0.01, 0.01])  #[0.008, 0.005])
-    # optimizer.param_groups[0]['lr'] = lr
-    # optimizer.param_groups[0]['betas'] = (0.9, 0.9)
     optimizer.step()
     with torch.no_grad():
         for mod in net.modules():
@@ -189,10 +157,8 @@ for _ in range(1, 50001):
         for i, p in enumerate(net.parameters()):
             average_params[i] = average_param_beta * average_params[i] + (1 - average_param_beta) * p
             average_param_weight = average_param_beta * average_param_weight + (1 - average_param_beta)
-    # print("{}: loss={:.6f}, acc={:.6f}".format(epoch, float(loss), float(accuracy)))
 
     if epoch % 100 == 0:
-        # train_accuracy = compute_accuracy(P, train_Y)
         with torch.no_grad():
             saved_params = [p.data.clone() for p in net.parameters()]
             for i, p in enumerate(net.parameters()):
@@ -202,7 +168,7 @@ for _ in range(1, 50001):
             test_loss = compute_loss(test_P, test_Y)
             test_acc = compute_accuracy(test_P, test_Y)
             print("{}: scale={:.6f}, train={:.6f}, test={:.6f}, acc={:.6f}, lr={:.6f}".format(
-                epoch, float(net.scaling.scale), float(train_loss), float(test_loss), float(test_acc),
+                epoch, float(net.scale), float(train_loss), float(test_loss), float(test_acc),
               optimizer.param_groups[0]['lr']))
 
             for i, p in enumerate(net.parameters()):
