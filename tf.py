@@ -3,7 +3,7 @@ import tensorflow_addons as tfa
 import logging
 import importlib
 import custom_model
-from custom_model import train_step, test_step, L1BallConstraint, Scaling, TropicalDense, LeakyReLU
+from custom_model import train_step, test_step, L1BallConstraint, Scaling, TropicalDense, LeakyReLU, RandomElasticDistortion, NoisyDense, L1Dense, L1BallDense
 from adabelief_tf import AdaBeliefOptimizer
 
 logging.basicConfig(format='%(asctime)s %(message)s',
@@ -32,88 +32,139 @@ def make_dataset(X, y):
          tf.cast(y, tf.int64)))
 
 
-train_ds = make_dataset(x_train, y_train).shuffle(1024).batch(64)
+train_ds = make_dataset(x_train, y_train).shuffle(65536).batch(512)
 
-test_ds = make_dataset(x_test, y_test).batch(64)
+test_ds = make_dataset(x_test, y_test).batch(2048)
 
 
-def make_model():
+def make_model(inp):
+    # bias_scale = 0.1
+    # slope_scale = 1.0
+    # init_slope = 1.0
+    # model = tf.keras.Sequential([
+    #     tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
+    #     tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
+    #     RandomElasticDistortion(3, 0.5),
+    #     # tf.keras.layers.experimental.preprocessing.RandomTranslation(0.05, 0.05, fill_mode='constant'),
+    #     # tf.keras.layers.Dropout(0.1),
+    #     # tf.keras.layers.Conv2D(32, [5, 5], strides=2, activation='relu'),
+    #     # tf.keras.layers.Conv2D(32, [5, 5], strides=2),
+    #     tf.keras.layers.Conv2D(32, [5, 5]),
+    #     # tf.keras.layers.Dropout(0.1),
+    #     tf.keras.layers.BatchNormalization(momentum=0.0),
+    #     LeakyReLU(bias_scale, slope_scale, init_slope),
+    #     # tf.keras.layers.PReLU(),
+    #     # tf.keras.layers.Activation(tf.nn.relu),
+    #     # tf.keras.layers.Activation(tf.math.atan),
+    #     tf.keras.layers.MaxPool2D(),
+    #     # tf.keras.layers.Dropout(0.1),
+    #     # tf.keras.layers.Conv2D(32, [3, 3], strides=2, activation='relu'),
+    #     # tf.keras.layers.Conv2D(32, [3, 3], strides=2),
+    #     tf.keras.layers.Conv2D(32, [3, 3]),
+    #     # tf.keras.layers.Dropout(0.1),
+    #     tf.keras.layers.BatchNormalization(momentum=0.0),
+    #     # tf.keras.layers.PReLU(),
+    #     # tf.keras.layers.Activation(tf.nn.relu),
+    #     # tf.keras.layers.Activation(tf.math.atan),
+    #     LeakyReLU(bias_scale, slope_scale, init_slope),
+    #     tf.keras.layers.MaxPool2D(),
+    #     # tf.keras.layers.Conv2D(16, [3, 3], strides=2, activation='relu'),
+    #     # tf.keras.layers.Dense(32, activation='relu'),
+    #     # tf.keras.layers.DepthwiseConv2D([3, 3], strides=2, depth_multiplier=1, activation='relu'),
+    #     # tf.keras.layers.Conv2D(32, [3, 3], strides=2, activation='relu'),
+    #     # tfa.layers.Maxout(16),
+    #     # tf.keras.layers.Conv2D(32, [4, 4], activation='relu', kernel_constraint=L1BallConstraint(axes=[0, 1, 2], num_iters=6, memory=False)),
+    #     # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
+    #     # tf.keras.layers.Dropout(0.1),
+    #     # tf.keras.layers.Conv2D(32, [5, 5], strides=2, activation='relu'),
+    #     # tf.keras.layers.Conv2D(32, [3, 3], activation='relu'),
+    #     # tfa.layers.Maxout(16),
+    #     # tf.keras.layers.Conv2D(32, [5, 5], strides=2, activation='relu'),
+    #     # tf.keras.layers.Conv2D(32, [5, 5], activation='relu', kernel_constraint=L1BallConstraint(axes=[0, 1, 2], num_iters=6, memory=False)),
+    #     # tf.keras.layers.MaxPool2D(),
+    #     # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
+    #     # tf.keras.layers.GlobalMaxPool2D(),
+    #     # tf.keras.layers.Conv2D(16, [3, 3], activation='relu'),
+    #     tf.keras.layers.Flatten(),
+    #     # tf.keras.layers.Dropout(0.1),
+    #     # tf.keras.layers.Dense(128, activation='relu'),
+    #     tf.keras.layers.Dense(256),
+    #     tf.keras.layers.BatchNormalization(momentum=0.0),
+    #     LeakyReLU(bias_scale, slope_scale, init_slope),
+    #     tf.keras.layers.Dense(256),
+    #     tf.keras.layers.BatchNormalization(momentum=0.0),
+    #     LeakyReLU(bias_scale, slope_scale, init_slope),
+    #     tf.keras.layers.Dense(10),
+    #     # tf.keras.layers.Dense(10, kernel_constraint=L1BallConstraint(axes=[0], num_iters=6, memory=False)),
+    #     # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
+    #     # Scaling(factor=2000.0),
+    # ])(inp)
+    # model = tf.keras.Sequential([
+    #     tf.keras.layers.Flatten(),
+    #     tf.keras.layers.Dense(256, activation='relu'),
+    #     # tf.keras.layers.Dropout(0.2),
+    #     tf.keras.layers.Dense(256, activation='relu'),
+    #     # tf.keras.layers.Dropout(0.2),
+    #     tf.keras.layers.Dense(256, activation='relu'),
+    #     # tf.keras.layers.Dropout(0.2),
+    #     tf.keras.layers.Dense(10),
+    # ])
+    # sigma = 0.0
+    # model = tf.keras.Sequential([
+    #     tf.keras.layers.Flatten(),
+    #     NoisyDense(sigma, 256, activation='relu'),
+    #     # tf.keras.layers.Dropout(0.5),
+    #     NoisyDense(sigma, 256, activation='relu'),
+    #     # tf.keras.layers.Dropout(0.5),
+    #     NoisyDense(sigma, 256, activation='relu'),
+    #     # tf.keras.layers.Dropout(0.5),
+    #     tf.keras.layers.Dense(10),
+    #     # NoisyDense(sigma, 10),
+    # ])
+    # model = tf.keras.Sequential([
+    #     tf.keras.layers.Flatten(),
+    #     L1Dense(256),
+    #     tf.keras.layers.ReLU(),
+    #     L1Dense(256),
+    #     tf.keras.layers.ReLU(),
+    #     L1Dense(256),
+    #     tf.keras.layers.ReLU(),
+    #     L1Dense(10),
+    #     Scaling(200.0),
+    #     # tf.keras.layers.Dense(10),
+    # ])
     model = tf.keras.Sequential([
-        tf.keras.Input(shape=(28, 28, 1)),
-        tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
-        tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
-        tf.keras.layers.experimental.preprocessing.RandomTranslation(0.05, 0.05, fill_mode='constant'),
-        # tf.keras.layers.Dropout(0.1),
-        # tf.keras.layers.Conv2D(32, [5, 5], strides=2, activation='relu'),
-        # tf.keras.layers.Conv2D(32, [5, 5], strides=2),
-        tf.keras.layers.Conv2D(32, [5, 5]),
-        LeakyReLU(),
-        tf.keras.layers.MaxPool2D(),
-        tf.keras.layers.Dropout(0.1),
-        # tf.keras.layers.Conv2D(32, [3, 3], strides=2, activation='relu'),
-        # tf.keras.layers.Conv2D(32, [3, 3], strides=2),
-        tf.keras.layers.Conv2D(32, [3, 3]),
-        LeakyReLU(),
-        tf.keras.layers.MaxPool2D(),
-        # tf.keras.layers.Conv2D(16, [3, 3], strides=2, activation='relu'),
-        # tf.keras.layers.Dense(32, activation='relu'),
-        # tf.keras.layers.DepthwiseConv2D([3, 3], strides=2, depth_multiplier=1, activation='relu'),
-        # tf.keras.layers.Conv2D(32, [3, 3], strides=2, activation='relu'),
-        # tfa.layers.Maxout(16),
-        # tf.keras.layers.Conv2D(32, [4, 4], activation='relu', kernel_constraint=L1BallConstraint(axes=[0, 1, 2], num_iters=6, memory=False)),
-        # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
-        # tf.keras.layers.Dropout(0.1),
-        # tf.keras.layers.Conv2D(32, [5, 5], strides=2, activation='relu'),
-        # tf.keras.layers.Conv2D(32, [3, 3], activation='relu'),
-        # tfa.layers.Maxout(16),
-        # tf.keras.layers.Conv2D(32, [5, 5], strides=2, activation='relu'),
-        # tf.keras.layers.Conv2D(32, [5, 5], activation='relu', kernel_constraint=L1BallConstraint(axes=[0, 1, 2], num_iters=6, memory=False)),
-        # tf.keras.layers.MaxPool2D(),
-        # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
-        # tf.keras.layers.GlobalMaxPool2D(),
-        # tf.keras.layers.Conv2D(16, [3, 3], activation='relu'),
         tf.keras.layers.Flatten(),
-        tf.keras.layers.Dropout(0.1),
-        # tf.keras.layers.Dense(128, activation='relu'),
-        tf.keras.layers.Dense(128),
-        LeakyReLU(),
-        # tf.keras.layers.Dense(128, activation='relu', kernel_constraint=L1BallConstraint(axes=[0], num_iters=6, memory=False)),
-        # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
-        tf.keras.layers.Dropout(0.1),
-        # tf.keras.layers.Dense(128),
-        # tfa.layers.Maxout(64),
-        tf.keras.layers.Dense(10),
-        # tf.keras.layers.Dense(10, kernel_constraint=L1BallConstraint(axes=[0], num_iters=6, memory=False)),
-        # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
-        # Scaling(factor=2000.0),
+        L1BallDense(256),
+        # tfa.layers.Maxout(128),
+        tf.keras.layers.ReLU(),
+        L1BallDense(256),
+        # tfa.layers.Maxout(128),
+        tf.keras.layers.ReLU(),
+        L1BallDense(256),
+        # tfa.layers.Maxout(128),
+        # tf.keras.layers.ReLU(),
+        # L1BallDense(256),
+        # tfa.layers.Maxout(128),
+        tf.keras.layers.ReLU(),
+        L1BallDense(10),
+        # tf.keras.layers.Dense(10),
+        Scaling(40.0, 5.0),
     ])
-    return model
+    return model(inp)
 
-# model = tf.keras.Sequential([
-#     tf.keras.Input(shape=(28, 28, 1)),
-#     tf.keras.layers.Flatten(),
-#     tf.keras.layers.Dense(512, activation='relu'),
-#     tf.keras.layers.Dropout(0.2),
-#     tf.keras.layers.Dense(512, activation='relu'),
-#     tf.keras.layers.Dropout(0.2),
-#     tf.keras.layers.Dense(512, activation='relu'),
-#     tf.keras.layers.Dropout(0.2),
-#     tf.keras.layers.Dense(10),
-# ])
 
-# model = tf.keras.Sequential([
-#     tf.keras.Input(shape=(28, 28, 1)),
-#     tf.keras.layers.Flatten(),
-#     TropicalDense(64),
-#     # TropicalDense(32),
-#     TropicalDense(10),
-#     # tf.keras.layers.Dense(16),
-#     # tf.keras.layers.Dense(10),
-#     Scaling(factor=50.0),
-# ])
-
-model = make_model()
+ensemble_size = 2
+inp = tf.keras.Input(shape=(28, 28, 1))
+raw_base_models = [make_model(inp) for _ in range(ensemble_size)]
+base_models = [tf.keras.Model(inputs=inp, outputs=m) for m in raw_base_models]
+if ensemble_size > 1:
+    ensemble_out = tf.keras.layers.Average()(raw_base_models)
+else:
+    ensemble_out = raw_base_models[0]
+model = tf.keras.Model(inputs=inp, outputs=ensemble_out)
 model.summary(print_fn=logging.info)
+base_models[0].summary(print_fn=logging.info)
 
 train_loss = tf.keras.metrics.Mean(name='train_loss')
 train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
@@ -124,10 +175,18 @@ test_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='test_accuracy')
 loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
 # optimizer = tf.keras.optimizers.Adam(learning_rate=0.002, beta_1=0.995, beta_2=0.995, epsilon=1e-07, amsgrad=False)
-optimizer = tf.keras.optimizers.Adam(learning_rate=0.001, beta_1=0.995, beta_2=0.995, epsilon=1e-07, amsgrad=False)
-logging.info(optimizer.get_config())
+# optimizer = tf.keras.optimizers.Adam(learning_rate=0.0015, beta_1=0.98, beta_2=0.99, epsilon=1e-07, amsgrad=False)
+# optimizer = tf.keras.optimizers.Adam(learning_rate=0.003, beta_1=0.98, beta_2=0.99, epsilon=1e-07, amsgrad=False)
+# logging.info(optimizer.get_config())
 # optimizer = AdaBeliefOptimizer(learning_rate=0.0005, beta1=0.995, beta2=0.995, epsilon=1e-07, amsgrad=False)
 # optimizer = AdaBeliefOptimizer(learning_rate=0.0005, beta_1=0.995, beta_2=0.995)
+
+# optimizer._create_all_weights(model.trainable_variables)
+optimizers = [tf.keras.optimizers.Adam(learning_rate=0.001, beta_1=0.99, beta_2=0.99, epsilon=1e-07, amsgrad=False)
+              for _ in range(ensemble_size)]
+for i, optimizer in enumerate(optimizers):
+    optimizer._create_all_weights(base_models[i].trainable_variables)
+logging.info(optimizers[0].get_config())
 
 EPOCHS = 1000
 # ema_beta = 0.995
@@ -152,7 +211,9 @@ for epoch in range(EPOCHS):
         # shadow_wt = shadow_wt * ema_beta + (1 - ema_beta)
         shadow_vars = [s + v.value() for s, v in zip(shadow_vars, model.variables)]
         shadow_wt = shadow_wt + 1.0
-        train_step(images, labels, model, optimizer, loss_fn, train_loss, train_accuracy)
+        # train_step(images, labels, model, optimizer, loss_fn, train_loss, train_accuracy)
+        for i, m in enumerate(base_models):
+            train_step(images, labels, m, optimizers[i], loss_fn, train_loss, train_accuracy)
 
     saved_vars = [v.value() for v in model.variables]
     for s, v in zip(shadow_vars, model.variables):
@@ -183,7 +244,8 @@ for epoch in range(EPOCHS):
         f'Accuracy: {train_accuracy.result() * 100}, '
         f'Test Loss: {test_loss.result()}, '
         f'Test Accuracy: {test_accuracy.result() * 100}, '
-        # f'Scale: {tf.reduce_mean(tf.abs(model.layers[-1].scale) * model.layers[-1].factor)}'
+        # f'Scale: {tf.reduce_mean(tf.abs(base_models[0].layers[1].layers[-1].scale) * base_models[0].layers[1].layers[-1].factor)}'
+        f'Scale: {tf.reduce_mean(tf.exp(base_models[0].layers[1].layers[-1].log_scale * base_models[0].layers[1].layers[-1].factor))}'
     )
 
 #
