@@ -3,7 +3,7 @@ import tensorflow_addons as tfa
 import logging
 import importlib
 import custom_model
-from custom_model import train_step, test_step, L1BallConstraint, Scaling, TropicalDense, LeakyReLU, RandomElasticDistortion, NoisyDense, L1Dense, L1BallDense
+from custom_model import train_step, test_step, Scaling, TropicalDense, LeakyReLU, RandomElasticDistortion, NoisyDense, L1Dense, L1BallDense, L1BallConstraint, SimplexConstraint
 from adabelief_tf import AdaBeliefOptimizer
 
 logging.basicConfig(format='%(asctime)s %(message)s',
@@ -32,12 +32,12 @@ def make_dataset(X, y):
          tf.cast(y, tf.int64)))
 
 
-train_ds = make_dataset(x_train, y_train).shuffle(65536).batch(512)
+train_ds = make_dataset(x_train, y_train).shuffle(65536).batch(1024)
 
 test_ds = make_dataset(x_test, y_test).batch(2048)
 
 
-def make_model(inp):
+def make_model():
     # bias_scale = 0.1
     # slope_scale = 1.0
     # init_slope = 1.0
@@ -133,40 +133,82 @@ def make_model(inp):
     #     Scaling(200.0),
     #     # tf.keras.layers.Dense(10),
     # ])
+    pen_coef = 2e-7
+    pen_exp = 10
+    scale_factor = 4.0
     model = tf.keras.Sequential([
+        # tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
+        # tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
+        # RandomElasticDistortion(3, 0.5),
         tf.keras.layers.Flatten(),
-        L1BallDense(256),
-        # tfa.layers.Maxout(128),
-        tf.keras.layers.ReLU(),
-        L1BallDense(256),
-        # tfa.layers.Maxout(128),
-        tf.keras.layers.ReLU(),
-        L1BallDense(256),
-        # tfa.layers.Maxout(128),
+        L1Dense(1024, pen_coef, pen_exp),
+        Scaling(scale_factor, 1.0),
+        tfa.layers.Maxout(256),
+        # tf.keras.layers.ReLU(),
+        L1Dense(1024, pen_coef, pen_exp),
+        Scaling(scale_factor, 1.0),
+        tfa.layers.Maxout(256),
+        # tf.keras.layers.ReLU(),
+        L1Dense(1024, pen_coef, pen_exp),
+        Scaling(scale_factor, 1.0),
+        tfa.layers.Maxout(256),
+        # tf.keras.layers.ReLU(),
+        L1Dense(1024, pen_coef, pen_exp),
+        Scaling(scale_factor, 1.0),
+        tfa.layers.Maxout(256),
+        # tf.keras.layers.ReLU(),
+        L1Dense(1024, pen_coef, pen_exp),
+        Scaling(scale_factor, 1.0),
+        tfa.layers.Maxout(256),
         # tf.keras.layers.ReLU(),
         # L1BallDense(256),
         # tfa.layers.Maxout(128),
-        tf.keras.layers.ReLU(),
-        L1BallDense(10),
+        # tf.keras.layers.ReLU(),
+        L1Dense(10, pen_coef, pen_exp),
         # tf.keras.layers.Dense(10),
-        Scaling(40.0, 5.0),
+        Scaling(scale_factor, 1.0),
     ])
-    return model(inp)
+    # model = tf.keras.Sequential([
+    #     tf.keras.layers.Flatten(),
+    #     tf.keras.layers.Dense(10),
+    # ])
+    # pen_coef = 5e-6
+    # pen_eps = 1e-3
+    # model = tf.keras.Sequential([
+    #     tf.keras.layers.Flatten(),
+    #     L1Dense(10, pen_coef, pen_eps),
+    #     Scaling(10000.0, 1.0),
+    # ])
+    return model
 
 
-ensemble_size = 2
+ensemble_size = 4
 inp = tf.keras.Input(shape=(28, 28, 1))
-raw_base_models = [make_model(inp) for _ in range(ensemble_size)]
-base_models = [tf.keras.Model(inputs=inp, outputs=m) for m in raw_base_models]
+preprocessing = tf.keras.Sequential([
+    tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
+    tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
+    RandomElasticDistortion(3, 0.5),
+])
+preprocessed_inp = preprocessing(inp)
+raw_base_models = [make_model() for _ in range(ensemble_size)]
+base_models = [m(preprocessed_inp) for m in raw_base_models]
 if ensemble_size > 1:
-    ensemble_out = tf.keras.layers.Average()(raw_base_models)
+    ensemble_out = tf.keras.layers.Average()(base_models)
 else:
-    ensemble_out = raw_base_models[0]
+    ensemble_out = base_models[0]
 model = tf.keras.Model(inputs=inp, outputs=ensemble_out)
 model.summary(print_fn=logging.info)
-base_models[0].summary(print_fn=logging.info)
+# base_models[0].summary(print_fn=logging.info)
+
+# with tf.GradientTape() as tape:
+#     predictions = model(images, training=True)
+#     loss = loss_fn(labels, predictions)
+#     obj = loss + sum(model.losses)
+# gradients = tape.gradient(obj, model.trainable_variables)
+# tf.print(gradients[0])
 
 train_loss = tf.keras.metrics.Mean(name='train_loss')
+train_obj = tf.keras.metrics.Mean(name='train_obj')
 train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
 
 test_loss = tf.keras.metrics.Mean(name='test_loss')
@@ -182,10 +224,17 @@ loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 # optimizer = AdaBeliefOptimizer(learning_rate=0.0005, beta_1=0.995, beta_2=0.995)
 
 # optimizer._create_all_weights(model.trainable_variables)
-optimizers = [tf.keras.optimizers.Adam(learning_rate=0.001, beta_1=0.99, beta_2=0.99, epsilon=1e-07, amsgrad=False)
+# optimizers = [tf.keras.optimizers.Adam(learning_rate=0.015, beta_1=0.999, beta_2=0.999, epsilon=1e-07, amsgrad=False)
+#               for _ in range(ensemble_size)]
+#
+optimizers = [tf.keras.optimizers.Adam(learning_rate=0.001, beta_1=0.999, beta_2=0.999, epsilon=1e-07, amsgrad=False)
               for _ in range(ensemble_size)]
+
+# optimizers = [tf.keras.optimizers.Adam(learning_rate=0.0005, beta_1=0.99, beta_2=0.99, epsilon=1e-07, amsgrad=False)
+#               for _ in range(ensemble_size)]
+
 for i, optimizer in enumerate(optimizers):
-    optimizer._create_all_weights(base_models[i].trainable_variables)
+    optimizer._create_all_weights(raw_base_models[i].trainable_variables)
 logging.info(optimizers[0].get_config())
 
 EPOCHS = 1000
@@ -194,11 +243,13 @@ EPOCHS = 1000
 
 cumul_preds = tf.zeros([len(y_test)] + list(model.output_shape[1:]))
 
+history_frac = 0.5
 preds_history = []
 # optimizer.learning_rate = 0.0005
 for epoch in range(EPOCHS):
     # Reset the metrics at the start of the next epoch
     train_loss.reset_states()
+    train_obj.reset_states()
     train_accuracy.reset_states()
     test_loss.reset_states()
     test_accuracy.reset_states()
@@ -212,8 +263,10 @@ for epoch in range(EPOCHS):
         shadow_vars = [s + v.value() for s, v in zip(shadow_vars, model.variables)]
         shadow_wt = shadow_wt + 1.0
         # train_step(images, labels, model, optimizer, loss_fn, train_loss, train_accuracy)
-        for i, m in enumerate(base_models):
-            train_step(images, labels, m, optimizers[i], loss_fn, train_loss, train_accuracy)
+        prep_images = preprocessing(images)
+        for i, m in enumerate(raw_base_models):
+            train_step(prep_images, labels, m, optimizers[i], loss_fn, train_loss, train_obj, train_accuracy)
+            # print(train_loss.result(), train_accuracy.result())
 
     saved_vars = [v.value() for v in model.variables]
     for s, v in zip(shadow_vars, model.variables):
@@ -227,26 +280,31 @@ for epoch in range(EPOCHS):
         preds_history.append(tf.zeros_like(cumul_preds))
     preds_history.append(cumul_preds)
 
-    ind_start = (len(preds_history) - 1) // 2
+    ind_start = int((len(preds_history) - 1) * (1.0 - history_frac))
     average_preds = (cumul_preds - preds_history[ind_start]) / (len(preds_history) - 1 - ind_start)
     t_loss = loss_fn(y_test, average_preds)
 
     test_loss(t_loss)
     test_accuracy(y_test, average_preds)
 
+    act_cnt = 0
+    for v in model.variables:
+        # if hasattr(v, 'constraint') and isinstance(v.constraint, L1BallConstraint):
+        #     act_cnt += tf.math.count_nonzero(v)
+        if hasattr(v, 'constraint') and isinstance(v.constraint, SimplexConstraint):
+            act_cnt += tf.math.count_nonzero(v)
+
 
     for s, v in zip(saved_vars, model.variables):
         v.assign(s)
 
+
+    avg_scale = tf.reduce_mean(tf.abs(raw_base_models[0].layers[-1].scale) * raw_base_models[0].layers[-1].factor)
+    # avg_scale = 0.0
     logging.info(
-        f'Epoch {epoch + 1}, '
-        f'Loss: {train_loss.result()}, '
-        f'Accuracy: {train_accuracy.result() * 100}, '
-        f'Test Loss: {test_loss.result()}, '
-        f'Test Accuracy: {test_accuracy.result() * 100}, '
-        # f'Scale: {tf.reduce_mean(tf.abs(base_models[0].layers[1].layers[-1].scale) * base_models[0].layers[1].layers[-1].factor)}'
-        f'Scale: {tf.reduce_mean(tf.exp(base_models[0].layers[1].layers[-1].log_scale * base_models[0].layers[1].layers[-1].factor))}'
-    )
+        '{}: loss={:.5f}, obj={:.5f}, acc={:.5f}, test_loss={:.5f}, test_acc={:.5f}, scale={:.5f}, act={}'.format(
+            epoch + 1, train_loss.result(), train_obj.result(), train_accuracy.result(),
+            test_loss.result(), test_accuracy.result(), avg_scale, act_cnt))
 
 #
 # model.compile(optimizer=avg_opt,

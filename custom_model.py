@@ -15,16 +15,18 @@ import math
 
 
 @tf.function
-def train_step(images, labels, model, optimizer, loss_fn, train_loss, train_accuracy):
+def train_step(images, labels, model, optimizer, loss_fn, train_loss, train_obj, train_accuracy):
     with tf.GradientTape() as tape:
         # training=True is only needed if there are layers with different
         # behavior during training versus inference (e.g. Dropout).
         predictions = model(images, training=True)
         loss = loss_fn(labels, predictions)
-    gradients = tape.gradient(loss, model.trainable_variables)
+        obj = loss + sum(model.losses)
+    gradients = tape.gradient(obj, model.trainable_variables)
     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
     train_loss(loss)
+    train_obj(obj)
     train_accuracy(labels, predictions)
 
 
@@ -129,19 +131,29 @@ class L1BallConstraint(tf.keras.constraints.Constraint):
 
 
 class L1Dense(tf.keras.layers.Layer):
-    def __init__(self, num_outputs):
+    def __init__(self, num_outputs, pen_coef=0.0, pen_exp=2.0):
         super().__init__()
         self.num_outputs = num_outputs
+        self.pen_coef = pen_coef
+        self.pen_exp = pen_exp
 
     def build(self, input_shape):
         self.input_dim = input_shape[-1]
         shape = [2, self.input_dim, self.num_outputs]
-        x = tf.math.log(tf.random.uniform(shape))
+        x = tf.random.gamma(shape, alpha=1.0, beta=1.0)
         x = x / tf.reduce_sum(x, axis=[0, 1], keepdims=True)
         self.kernel_pos_neg = tf.Variable(x, constraint=SimplexConstraint([0, 1], 8, False))
         self.bias = tf.Variable(tf.zeros([self.num_outputs]))
 
-    def call(self, X):
+    def penalty(self):
+        x = self.kernel_pos_neg
+        # return tf.reduce_sum(self.pen_coef * (tf.math.log(x + self.pen_eps) - math.log(self.pen_eps) -
+        #                                       x * (tf.math.log(1 + self.pen_eps) - math.log(self.pen_eps))))
+        return tf.reduce_sum(1.0 - (1.0 - x) ** self.pen_exp - x) * self.pen_coef
+
+    def call(self, X, training=None):
+        if training:
+            self.add_loss(self.penalty())
         kernel = self.kernel_pos_neg[0, :, :] - self.kernel_pos_neg[1, :, :]
         # bias = tf.reduce_sum(self.kernel_pos_neg[1, :, :], axis=0)
         return tf.matmul(X, kernel) + tf.expand_dims(self.bias, 0)
@@ -156,12 +168,12 @@ class L1BallDense(tf.keras.layers.Layer):
     def build(self, input_shape):
         self.input_dim = input_shape[-1]
         shape = [self.input_dim, self.num_outputs]
-        x = tf.math.log(tf.random.uniform(shape))
+        x = tf.random.gamma(shape, alpha=1.0, beta=1.0)
         x = x / tf.reduce_sum(x, axis=[0], keepdims=True)
         self.kernel = tf.Variable(x, constraint=L1BallConstraint([0], 8, False))
         self.bias = tf.Variable(tf.zeros([self.num_outputs]))
 
-    def call(self, X):
+    def call(self, X, training=None):
         return tf.matmul(X, self.kernel) + tf.expand_dims(self.bias, 0)
 
 
@@ -211,14 +223,28 @@ class Scaling(tf.keras.layers.Layer):
         self.init_scale = init_scale
 
     def build(self, input_shape):
-        # self.scale = tf.Variable(tf.fill(input_shape[1:], self.init_scale / self.factor))
-        self.log_scale = tf.Variable(tf.zeros(input_shape[1:]))
+        self.scale = tf.Variable(tf.fill(input_shape[1:], self.init_scale / self.factor))
+        # self.log_scale = tf.Variable(tf.zeros(input_shape[1:]))
         self.bias = tf.Variable(tf.zeros(input_shape[1:]))
 
     def call(self, X):
-        # scale = tf.expand_dims(self.scale * self.factor, 0)
-        scale = tf.expand_dims(tf.exp(self.log_scale * self.factor), 0)
+        scale = tf.expand_dims(self.scale * self.factor, 0)
+        # scale = tf.expand_dims(tf.exp(self.log_scale * self.factor), 0)
         return scale * X + tf.expand_dims(self.bias, 0)
+
+
+class GlobalScaling(tf.keras.layers.Layer):
+    def __init__(self, factor: float, init_scale: float):
+        super().__init__()
+        self.factor = factor
+        self.init_scale = init_scale
+
+    def build(self, input_shape):
+        self.scale = tf.Variable(self.init_scale / self.factor)
+
+    def call(self, X):
+        scale = tf.expand_dims(self.scale * self.factor, 0)
+        return scale * X
 
 
 class TropicalDense(tf.keras.layers.Layer):
