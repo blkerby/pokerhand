@@ -1,9 +1,17 @@
 """Implement activation function on `n` inputs which is an arbitrary continuous piecewise-linear function on R^n with
-non-differentiability only on the hyperplanes e_i = e_j (i.e., where two inputs are equal). Such a function
-is determined by its value on the 2^n points of a hypercube. We restrict to functions which are 0 at the origin,
-so that on each component the function is linear (and not only an affine function). The space of such functions
-has a basis consisting of 2^n - 1 terms of the form x_i, min(x_i, x_j), min(x_i, x_j, x_k), ..., min(x_1, ..., x_n),
-but we don't need to use this fact.
+non-differentiability only on the hyperplanes e_i = e_j (i.e., where two inputs are equal). We restrict to functions
+which are 0 at the origin, so that on each component the function is linear (and not only an affine function). The
+space of such functions has a basis consisting of 2^n - 1 terms of the form x_i, min(x_i, x_j), min(x_i, x_j, x_k),
+..., min(x_1, ..., x_n), but we don't need to use this fact. Instead, we use the fact that such a function is
+determined by its value on the 2^n - 1 vertices of the hypercube {0, 1}^n excluding the origin; the hyperplanes
+e_i = e_j partition the hypercube [0, 1]^n into a simplicial complex (with n! simplices, one for each possible ordering
+of the components x_i)) with the points {0, 1}^n being the vertices; any function on the vertex set then extends
+uniquely to a continuous, piecewise-linear function on the simplicial complex, linear on each simplex.
+
+The motivation is that this allows us to implement a higher-order interaction between `n` variables in a single layer.
+For instance, for inputs in the set {0, 1} an arbitrary Boolean function in the `n` variables can be represented. Also,
+the number of parameters grows exponentially as 2^n - 1, yet the computation required for an inference or training pass
+only grows linearly with `n`; this is because only `n` of the parameters need to be accessed for any given example.
 """
 
 import tensorflow as tf
