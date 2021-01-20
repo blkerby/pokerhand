@@ -37,17 +37,24 @@ def high_order_act(A, params):
     out = tf.einsum('jikl,ijk->ijl', params_gather, coef)
     return out
 
-# class HighOrderActivation(tf.keras.layers.Layer):
-#     def __init__(self, arity, out_dim):
-#         super().__init__()
-#         self.arity = arity
-#         self.out_dim = out_dim
-#
-#     def build(self, input_shape):
-#         assert len(input_shape) == 2
-#         assert input_shape[1] % self.arity == 0
-#         self.input_dim = input_shape[1]
-#         self.params = tf.Variable(tf.random_normal([self.input_dim]))
+
+class HighOrderActivation(tf.keras.layers.Layer):
+    def __init__(self, arity, out_dim):
+        super().__init__()
+        self.arity = arity
+        self.out_dim = out_dim
+
+    def build(self, input_shape):
+        assert len(input_shape) == 3
+        assert input_shape[2] == self.arity
+        self.input_dim = input_shape[1]
+        self.params = tf.Variable(tf.random.normal([self.input_dim, 2 ** self.arity, self.out_dim]))
+
+    def call(self, X):
+        assert len(X.shape) == 3
+        assert X.shape[1] == self.input_dim
+        assert X.shape[2] == self.arity
+        return high_order_act(X, self.params)
 
 # A = tf.random.normal([2, 4])
 n = 3
@@ -63,6 +70,9 @@ A = tf.constant([[
 ]])
 out = high_order_act(A, params)
 
-import matplotlib.pyplot as plt
-plt.scatter(out[:, 0].numpy(), out[:, 1].numpy())
-plt.show()
+model = HighOrderActivation(n, 4)
+model(A)
+
+# import matplotlib.pyplot as plt
+# plt.scatter(out[:, 0].numpy(), out[:, 1].numpy())
+# plt.show()
