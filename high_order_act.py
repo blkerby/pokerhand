@@ -33,15 +33,30 @@ def high_order_act(A, params):
     A_diff = A_sort[:, 1:] - A_sort[:, :-1]
     coef = tf.concat([A_sort[:, 0:1], A_diff], axis=1)
     params_gather = tf.gather(params, tf.gather(params_ind, A_ind, batch_dims=1))
-    out = tf.reduce_sum(coef * params_gather, axis=1)
+    out = tf.einsum('ij,ijk->ik', coef, params_gather)
     return out
 
+# class HighOrderActivation(tf.keras.layers.Layer):
+#     def __init__(self, arity, out_dim):
+#         super().__init__()
+#         self.arity = arity
+#         self.out_dim = out_dim
+#
+#     def build(self, input_shape):
+#         assert len(input_shape) == 2
+#         assert input_shape[1] % self.arity == 0
+#         self.input_dim = input_shape[1]
+#         self.params = tf.Variable(tf.random_normal([self.input_dim]))
 
 # A = tf.random.normal([2, 4])
-params = tf.random.normal([8])
-A = tf.constant([[0.5, 0.5, 0.5]])
-print(high_order_act(A, params), params)
+n = 4
+params = tf.random.normal([2 ** n, 2])
+A1 = tf.random.normal([n])
+A2 = tf.random.normal([n])
+ts = tf.reshape(tf.range(100, dtype=tf.float32) / 100.0, [-1, 1])
+A = tf.reshape(A1, [1, n]) * ts + tf.reshape(A2, [1, n]) * (1 - ts)
+out = high_order_act(A, params)
 
-# def high_order_act(A, params):
-#     A_ind = tf.argsort(A, axis=0)
-
+import matplotlib.pyplot as plt
+plt.scatter(out[:, 0].numpy(), out[:, 1].numpy())
+plt.show()
