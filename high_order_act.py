@@ -20,20 +20,21 @@ def pack_bits(A):
     """Convert an array of booleans into ints by interpreting the booleans as bits in a binary representation.
     (There should be a faster way to do this without needing to do multiplications, but not sure if there is any
     support in TensorFlow yet.)"""
-    n = A.shape[2]
+    n = A.shape[3]
     powers = 2 ** tf.range(n)
-    return tf.reduce_sum(tf.expand_dims(tf.expand_dims(powers, 0), 1) * tf.cast(A, tf.int32), axis=2)
+    return tf.reduce_sum(tf.expand_dims(tf.expand_dims(tf.expand_dims(powers, 0), 1), 2) * tf.cast(A, tf.int32), axis=3)
 
 
 def high_order_act(A, params):
-    A_mask = tf.expand_dims(A, 1) >= tf.expand_dims(A, 2)
+    A_mask = tf.expand_dims(A, 2) >= tf.expand_dims(A, 3)
     params_ind = pack_bits(A_mask)
-    A_ind = tf.argsort(A, axis=1)
-    A_sort = tf.gather(A, A_ind, batch_dims=1)
-    A_diff = A_sort[:, 1:] - A_sort[:, :-1]
-    coef = tf.concat([A_sort[:, 0:1], A_diff], axis=1)
-    params_gather = tf.gather(params, tf.gather(params_ind, A_ind, batch_dims=1))
-    out = tf.einsum('ij,ijk->ik', coef, params_gather)
+    A_ind = tf.argsort(A, axis=2)
+    A_sort = tf.gather(A, A_ind, batch_dims=2)
+    A_diff = A_sort[:, :, 1:] - A_sort[:, :, :-1]
+    coef = tf.concat([A_sort[:, :, 0:1], A_diff], axis=2)
+    params_A_ind = tf.gather(params_ind, A_ind, batch_dims=2)
+    params_gather = tf.gather(params, tf.transpose(params_A_ind, perm=[1, 0, 2]), batch_dims=1)
+    out = tf.einsum('jikl,ijk->ijl', params_gather, coef)
     return out
 
 # class HighOrderActivation(tf.keras.layers.Layer):
@@ -49,12 +50,17 @@ def high_order_act(A, params):
 #         self.params = tf.Variable(tf.random_normal([self.input_dim]))
 
 # A = tf.random.normal([2, 4])
-n = 4
-params = tf.random.normal([2 ** n, 2])
-A1 = tf.random.normal([n])
-A2 = tf.random.normal([n])
-ts = tf.reshape(tf.range(100, dtype=tf.float32) / 100.0, [-1, 1])
-A = tf.reshape(A1, [1, n]) * ts + tf.reshape(A2, [1, n]) * (1 - ts)
+n = 3
+k = 2
+params = tf.random.normal([k, 2 ** n, 4])
+# A1 = tf.random.normal([k, n])
+# A2 = tf.random.normal([k, n])
+# ts = tf.reshape(tf.range(100, dtype=tf.float32) / 100.0, [-1, 1, 1])
+# A = tf.expand_dims(A1, 0) * ts + tf.expand_dims(A2, 0) * (1 - ts)
+A = tf.constant([[
+    [1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0],
+]])
 out = high_order_act(A, params)
 
 import matplotlib.pyplot as plt
