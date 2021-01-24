@@ -38,6 +38,18 @@ def high_order_act(A, params):
     return out
 
 
+
+def fast_high_order_act(A, params):
+    A_ind = tf.argsort(A, axis=2)
+    A_sort = tf.gather(A, A_ind, batch_dims=2)
+    A_diff = A_sort[:, :, 1:] - A_sort[:, :, :-1]
+    coef = tf.concat([A_sort[:, :, 0:1], A_diff], axis=2)
+    params_A_ind = tf.cumsum(tf.bitwise.left_shift(1, A_ind), reverse=True, axis=2)
+    params_gather = tf.gather(params, tf.transpose(params_A_ind, perm=[1, 0, 2]), batch_dims=1)
+    out = tf.einsum('jikl,ijk->ijl', params_gather, coef)
+    return out
+
+
 class HighOrderActivation(tf.keras.layers.Layer):
     def __init__(self, arity, out_dim):
         super().__init__()
@@ -54,25 +66,39 @@ class HighOrderActivation(tf.keras.layers.Layer):
         assert len(X.shape) == 3
         assert X.shape[1] == self.input_dim
         assert X.shape[2] == self.arity
-        return high_order_act(X, self.params)
+        # return high_order_act(X, self.params)
+        return fast_high_order_act(X, self.params)
 
-# A = tf.random.normal([2, 4])
-n = 3
-k = 2
-params = tf.random.normal([k, 2 ** n, 4])
-# A1 = tf.random.normal([k, n])
-# A2 = tf.random.normal([k, n])
-# ts = tf.reshape(tf.range(100, dtype=tf.float32) / 100.0, [-1, 1, 1])
-# A = tf.expand_dims(A1, 0) * ts + tf.expand_dims(A2, 0) * (1 - ts)
-A = tf.constant([[
-    [1.0, 0.0, 0.0],
-    [0.0, 0.0, 1.0],
-]])
-out = high_order_act(A, params)
 
-model = HighOrderActivation(n, 4)
-model(A)
 
-# import matplotlib.pyplot as plt
-# plt.scatter(out[:, 0].numpy(), out[:, 1].numpy())
-# plt.show()
+class BatchHighOrderActivation(tf.keras.layers.Layer):
+    def __init__(self, arity, out_dim):
+        super().__init__()
+        self.arity = arity
+        self.out_dim = out_dim
+
+    def build(self, input_shape):
+        assert input_shape[-1] == self.arity
+        self.input_dim = input_shape[-2]
+        self.params = tf.Variable(tf.random.normal([self.input_dim, 2 ** self.arity, self.out_dim]))
+
+    def call(self, X):
+        X1 = tf.reshape(X, [-1, self.input_dim, self.arity])
+        # Y1 = high_order_act(X1, self.params)
+        Y1 = fast_high_order_act(X1, self.params)
+        Y_shape = list(X.shape)
+        Y_shape[0] = -1
+        Y_shape[-1] = self.out_dim
+        Y = tf.reshape(Y1, tf.constant(Y_shape))
+        return Y
+
+
+
+# m = 2
+# n = 4
+# k = 4
+# params = tf.random.normal([k, 2 ** n, 4])
+# A = tf.random.normal([m, k, n])
+# out = high_order_act(A, params)
+# out2 = fast_high_order_act(A, params)
+# print(out - out2)

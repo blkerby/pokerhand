@@ -134,8 +134,8 @@ class L1Dense(tf.keras.layers.Layer):
     def __init__(self, num_outputs, pen_coef=0.0, pen_exp=2.0):
         super().__init__()
         self.num_outputs = num_outputs
-        self.pen_coef = pen_coef
-        self.pen_exp = pen_exp
+        self.pen_coef = tf.Variable(pen_coef, trainable=False)
+        self.pen_exp = tf.Variable(pen_exp, trainable=False)
 
     def build(self, input_shape):
         self.input_dim = input_shape[-1]
@@ -157,6 +157,31 @@ class L1Dense(tf.keras.layers.Layer):
         kernel = self.kernel_pos_neg[0, :, :] - self.kernel_pos_neg[1, :, :]
         # bias = tf.reduce_sum(self.kernel_pos_neg[1, :, :], axis=0)
         return tf.matmul(X, kernel) + tf.expand_dims(self.bias, 0)
+
+
+class L1PositiveDense(tf.keras.layers.Layer):
+    def __init__(self, num_outputs, pen_coef=0.0, pen_exp=2.0):
+        super().__init__()
+        self.num_outputs = num_outputs
+        self.pen_coef = tf.Variable(pen_coef, trainable=False)
+        self.pen_exp = tf.Variable(pen_exp, trainable=False)
+
+    def build(self, input_shape):
+        self.input_dim = input_shape[-1]
+        shape = [self.input_dim, self.num_outputs]
+        x = tf.random.gamma(shape, alpha=1.0, beta=1.0)
+        x = x / tf.reduce_sum(x, axis=0, keepdims=True)
+        self.kernel = tf.Variable(x, constraint=SimplexConstraint([0], 8, False))
+        self.bias = tf.Variable(tf.zeros([self.num_outputs]))
+
+    def penalty(self):
+        x = self.kernel
+        return tf.reduce_sum(1.0 - (1.0 - x) ** self.pen_exp - x) * self.pen_coef
+
+    def call(self, X, training=None):
+        if training:
+            self.add_loss(self.penalty())
+        return tf.matmul(X, self.kernel) + tf.expand_dims(self.bias, 0)
 
 
 
