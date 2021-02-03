@@ -2,7 +2,7 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 import logging
 from custom_model import train_step, test_step, Scaling, TropicalDense, LeakyReLU, RandomElasticDistortion, NoisyDense, \
-    L1Dense, L1BallDense, L1BallConstraint, SimplexConstraint, L1PositiveDense
+    L1Dense, L1BallDense, L1BallConstraint, SimplexConstraint, L1PositiveDense, Bias
 from high_order_act import HighOrderActivation, BatchHighOrderActivation
 from adabelief_tf import AdaBeliefOptimizer
 
@@ -20,9 +20,9 @@ def make_dataset(X, y):
         (tf.cast(X[..., tf.newaxis] / 255.0, tf.float32),
          tf.cast(y, tf.int64)))
 
-
-train_ds = make_dataset(x_train, y_train).shuffle(65536).batch(512)
-test_ds = make_dataset(x_test, y_test).batch(2048)
+BATCH_SIZE = 512
+train_ds = make_dataset(x_train, y_train).shuffle(65536).batch(BATCH_SIZE)
+test_ds = make_dataset(x_test, y_test).batch(BATCH_SIZE)
 
 
 def make_model():
@@ -124,39 +124,44 @@ def make_model():
     #     # Scaling(scale_factor, 1.0),
     # ])
 
-    bias_scale = 0.1
-    slope_scale = 1.0
-    init_slope = 1.0
+    # bias_scale = 0.1
+    # slope_scale = 1.0
+    # init_slope = 1.0
+    act_l2_pen_coef = 0.1
+    pen_coef = 1e-5
+    pen_exp = 10.0
+    act_arity = 32
     model = tf.keras.Sequential([
         # tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
         # tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
         # RandomElasticDistortion(3, 0.5),
-        tf.keras.layers.Conv2D(32, [5, 5]),
-        # LeakyReLU(bias_scale, slope_scale, init_slope),
-        tf.keras.layers.Reshape([24, 24, 4, 8]),
-        BatchHighOrderActivation(8, 16),
-        tf.keras.layers.Reshape([24, 24, 64]),
-        tf.keras.layers.MaxPool2D(),
-        tf.keras.layers.Conv2D(32, [3, 3]),
-        # LeakyReLU(bias_scale, slope_scale, init_slope),
-        tf.keras.layers.Reshape([10, 10, 4, 8]),
-        BatchHighOrderActivation(8, 16),
-        tf.keras.layers.Reshape([10, 10, 64]),
-        tf.keras.layers.MaxPool2D(),
+        tf.keras.layers.Conv2D(act_arity, [5, 5], strides=2),
+        # tf.keras.layers.Reshape([12, 12, 1, act_arity]),
+        # BatchHighOrderActivation(act_arity, act_arity),
+        # tf.keras.layers.Reshape([12, 12, act_arity]),
+        tf.keras.layers.ReLU(),
+        tf.keras.layers.Conv2D(act_arity, [5, 5], strides=2),
+        # tf.keras.layers.Reshape([4, 4, 1, act_arity]),
+        # BatchHighOrderActivation(act_arity, act_arity),
+        # tf.keras.layers.Reshape([4, 4, act_arity]),
+        tf.keras.layers.ReLU(),
+        # tf.keras.layers.MaxPool2D(),
         tf.keras.layers.Flatten(),
-        L1Dense(256),
-        # tf.keras.layers.Dense(256),
-        # LeakyReLU(bias_scale, slope_scale, init_slope),
-        tf.keras.layers.Reshape([-1, 8]),
-        HighOrderActivation(8, 16),
+        L1Dense(act_arity * 16, pen_coef=pen_coef, pen_exp=pen_exp),
+        # tf.keras.layers.Dense(act_arity * 16),
+        # tf.keras.layers.Reshape([-1, act_arity]),
+        # HighOrderActivation(act_arity, act_arity, l2_pen_coef=act_l2_pen_coef),
+        # HighOrderActivation(act_arity, 10, l2_pen_coef=act_l2_pen_coef),
+        tf.keras.layers.ReLU(),
         tf.keras.layers.Flatten(),
-        L1Dense(256),
-        # tf.keras.layers.Dense(256),
-        # LeakyReLU(bias_scale, slope_scale, init_slope),
-        tf.keras.layers.Reshape([-1, 8]),
-        HighOrderActivation(8, 16),
-        tf.keras.layers.Flatten(),
+        # # tf.keras.layers.ReLU(),
+        # L1Dense(128, pen_coef=pen_coef, pen_exp=pen_exp),
+        # tf.keras.layers.Reshape([-1, 8]),
+        # HighOrderActivation(8, 8, l2_pen_coef=act_l2_pen_coef),
+        # # tf.keras.layers.ReLU(),
+        # tf.keras.layers.Flatten(),
         tf.keras.layers.Dense(10),
+        # Bias(),
     ])
 
     # pen_coef = 0.0  # 1e-6
@@ -187,18 +192,6 @@ def make_model():
     #     # Scaling(scale_factor, 1.0),
     # ])
 
-    # sigma = 0.0
-    # model = tf.keras.Sequential([
-    #     tf.keras.layers.Flatten(),
-    #     NoisyDense(sigma, 256, activation='relu'),
-    #     # tf.keras.layers.Dropout(0.5),
-    #     NoisyDense(sigma, 256, activation='relu'),
-    #     # tf.keras.layers.Dropout(0.5),
-    #     NoisyDense(sigma, 256, activation='relu'),
-    #     # tf.keras.layers.Dropout(0.5),
-    #     tf.keras.layers.Dense(10),
-    #     # NoisyDense(sigma, 10),
-    # ])
     # model = tf.keras.Sequential([
     #     tf.keras.layers.Flatten(),
     #     L1Dense(256),
@@ -208,7 +201,7 @@ def make_model():
     #     L1Dense(256),
     #     tf.keras.layers.ReLU(),
     #     L1Dense(10),
-    #     Scaling(200.0),
+    #     Scaling(200.0, 1.0),
     #     # tf.keras.layers.Dense(10),
     # ])
     # pen_coef = 2e-7
@@ -266,9 +259,9 @@ preprocessing = tf.keras.Sequential([
     # tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
     # tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
     # RandomElasticDistortion(3, 0.5),
-    tf.keras.layers.experimental.preprocessing.RandomRotation(0.03, fill_mode='constant'),
-    tf.keras.layers.experimental.preprocessing.RandomZoom(0.05, fill_mode='constant'),
-    RandomElasticDistortion(3, 0.3),
+    # tf.keras.layers.experimental.preprocessing.RandomRotation(0.03, fill_mode='constant'),
+    # tf.keras.layers.experimental.preprocessing.RandomZoom(0.06, fill_mode='constant'),
+    # RandomElasticDistortion(3, 0.3),
 ])
 preprocessed_inp = preprocessing(inp)
 raw_base_models = [make_model() for _ in range(ensemble_size)]
@@ -304,11 +297,12 @@ loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 # optimizer = AdaBeliefOptimizer(learning_rate=0.0005, beta1=0.995, beta2=0.995, epsilon=1e-07, amsgrad=False)
 # optimizer = AdaBeliefOptimizer(learning_rate=0.0005, beta_1=0.995, beta_2=0.995)
 
-# optimizers = [tf.keras.optimizers.Adam(learning_rate=0.005, beta_1=0.999, beta_2=0.999, epsilon=1e-07, amsgrad=False)
-#               for _ in range(ensemble_size)]
 
-optimizers = [tf.keras.optimizers.Adam(learning_rate=0.002, beta_1=0.999, beta_2=0.999, epsilon=1e-07, amsgrad=False)
+optimizers = [tf.keras.optimizers.Adam(learning_rate=0.01, beta_1=0.99, beta_2=0.999, epsilon=1e-07, amsgrad=False)
               for _ in range(ensemble_size)]
+
+# optimizers = [AdaBeliefOptimizer(learning_rate=0.005, beta_1=0.995, beta_2=0.999, rectify=False)
+#               for _ in range(ensemble_size)]
 
 # optimizers = [tf.keras.optimizers.SGD(learning_rate=0.0005, momentum=0.99)
 #               for _ in range(ensemble_size)]
@@ -317,7 +311,7 @@ for i, optimizer in enumerate(optimizers):
     optimizer._create_all_weights(raw_base_models[i].trainable_variables)
 logging.info(optimizers[0].get_config())
 
-EPOCHS = 1000
+EPOCHS = 5000
 # ema_beta = 0.995
 # ema_beta = 0.0
 
@@ -325,16 +319,22 @@ cumul_preds = tf.zeros([len(y_test)] + list(model.output_shape[1:]))
 
 history_frac = 0.5
 preds_history = []
-# optimizer.learning_rate = 0.0005
 
+# for optimizer in optimizers:
+#     optimizer.learning_rate = 1e-8
+#     optimizer.beta_1 = 0.999
+#     optimizer.beta_1 = 0.9998
+# for model in raw_base_models:
+#     for layer in model.layers:
+#         if hasattr(layer, "pen_coef"):
+#             layer.pen_coef.assign(3e-4)
+#             layer.pen_exp.assign(5.0)
 
-for epoch in range(EPOCHS):
+for _ in range(EPOCHS):
     # Reset the metrics at the start of the next epoch
     train_loss.reset_states()
     train_obj.reset_states()
     train_accuracy.reset_states()
-    test_loss.reset_states()
-    test_accuracy.reset_states()
 
     # for m in raw_base_models:
     #     for layer in m.layers:
@@ -371,6 +371,8 @@ for epoch in range(EPOCHS):
     average_preds = (cumul_preds - preds_history[ind_start]) / (len(preds_history) - 1 - ind_start)
     t_loss = loss_fn(y_test, average_preds)
 
+    test_loss.reset_states()
+    test_accuracy.reset_states()
     test_loss(t_loss)
     test_accuracy(y_test, average_preds)
 
@@ -381,6 +383,12 @@ for epoch in range(EPOCHS):
         if hasattr(v, 'constraint') and isinstance(v.constraint, SimplexConstraint):
             act_cnt += tf.math.count_nonzero(v)
 
+    epoch = len(preds_history) - 1
+    logging.info(
+        '{}: loss={:.5f}, obj={:.5f}, acc={:.5f}, test_loss={:.5f}, test_acc={:.5f}, act={}'.format(
+            epoch, train_loss.result(), train_obj.result(), train_accuracy.result(),
+            test_loss.result(), test_accuracy.result(), act_cnt))
+
     for s, v in zip(saved_vars, model.trainable_variables):
         v.assign(s)
 
@@ -390,10 +398,6 @@ for epoch in range(EPOCHS):
     #         epoch + 1, train_loss.result(), train_obj.result(), train_accuracy.result(),
     #         test_loss.result(), test_accuracy.result()))
 
-    logging.info(
-        '{}: loss={:.5f}, obj={:.5f}, acc={:.5f}, test_loss={:.5f}, test_acc={:.5f}, act={}'.format(
-            epoch + 1, train_loss.result(), train_obj.result(), train_accuracy.result(),
-            test_loss.result(), test_accuracy.result(), act_cnt))
 
     # avg_scale = tf.reduce_mean(tf.abs(raw_base_models[0].layers[-1].scale) * raw_base_models[0].layers[-1].factor)
     # logging.info(

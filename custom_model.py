@@ -32,9 +32,7 @@ def train_step(images, labels, model, optimizer, loss_fn, train_loss, train_obj,
 
 @tf.function
 def test_step(images, model):
-    # training=False is only needed if there are layers with different
-    # behavior during training versus inference (e.g. Dropout).
-    predictions = model(images, training=False)
+    predictions = model(images, training=True)
     return predictions
 
 
@@ -450,6 +448,7 @@ def elastic_distortion(images, deg, sigma):
     out = tf.gather_nd(images, tf.stack([x, y], axis=-1), batch_dims=1)
     return out
 
+
 class RandomElasticDistortion(tf.keras.layers.Layer):
     def __init__(self, degree, sigma):
         super().__init__()
@@ -462,7 +461,9 @@ class RandomElasticDistortion(tf.keras.layers.Layer):
         self.image_size = input_shape[1]
         self.channels = input_shape[3]
 
-    def call(self, X):
+    def call(self, X, training=None):
+        if not training:
+            return X
         X_split = tf.split(X, 2)
         distorted = elastic_distortion(X_split[0], self.degree, self.sigma)
         distorted = tf.reshape(distorted, tf.shape(X_split[0]))  # This doesn't actually reshape, just helps Tensorflow infer output shape
@@ -482,3 +483,14 @@ class NoisyDense(tf.keras.layers.Dense):
             return clean_out + noise
         else:
             return clean_out
+
+
+class Bias(tf.keras.layers.Layer):
+    def __init__(self):
+        super().__init__()
+
+    def build(self, input_shape):
+        self.bias = tf.Variable(tf.zeros(input_shape[1:]))
+
+    def call(self, X):
+        return X + tf.expand_dims(self.bias, 0)

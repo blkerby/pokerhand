@@ -38,7 +38,7 @@ def high_order_act(A, params):
     return out
 
 
-
+@tf.function
 def fast_high_order_act(A, params):
     A_ind = tf.argsort(A, axis=2)
     A_sort = tf.gather(A, A_ind, batch_dims=2)
@@ -51,10 +51,11 @@ def fast_high_order_act(A, params):
 
 
 class HighOrderActivation(tf.keras.layers.Layer):
-    def __init__(self, arity, out_dim):
+    def __init__(self, arity, out_dim, l2_pen_coef):
         super().__init__()
         self.arity = arity
         self.out_dim = out_dim
+        self.l2_pen_coef = tf.Variable(l2_pen_coef, trainable=False)
 
     def build(self, input_shape):
         assert len(input_shape) == 3
@@ -62,10 +63,22 @@ class HighOrderActivation(tf.keras.layers.Layer):
         self.input_dim = input_shape[1]
         self.params = tf.Variable(tf.random.normal([self.input_dim, 2 ** self.arity, self.out_dim]))
 
-    def call(self, X):
+    def penalty(self):
+        terms = []
+        for i in range(self.arity):
+            shape0 = 2 ** i
+            shape1 = 2 ** (self.arity - i - 1)
+            params_rs = tf.reshape(self.params, [self.input_dim, shape0, 2, shape1, self.out_dim])
+            diff = params_rs[:, :, 0, :, :] - params_rs[:, :, 1, :, :]
+            terms.append(tf.reduce_mean(diff ** 2))
+        return sum(terms) * (self.l2_pen_coef / len(terms))
+
+    def call(self, X, training=None):
         assert len(X.shape) == 3
         assert X.shape[1] == self.input_dim
         assert X.shape[2] == self.arity
+        if training:
+            self.add_loss(self.penalty())
         # return high_order_act(X, self.params)
         return fast_high_order_act(X, self.params)
 
