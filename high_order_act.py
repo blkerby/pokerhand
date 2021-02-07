@@ -78,8 +78,8 @@ class HighOrderActivation(tf.keras.layers.Layer):
         assert X.shape[2] == self.arity
         if training:
             self.add_loss(self.penalty())
-        # return fast_high_order_act(X, self.params)
-        out = sparsemm_high_order_act(X, self.params)
+        return fast_high_order_act(X, self.params)
+        # out = sparsemm_high_order_act(X, self.params)
         return tf.reshape(out, [tf.shape(X)[0], self.input_dim, self.out_dim])
 
 
@@ -101,8 +101,8 @@ class BatchHighOrderActivation(tf.keras.layers.Layer):
         if training:
             self.add_loss(self.penalty())
         X1 = tf.reshape(X, [-1, self.input_dim, self.arity])
-        # Y1 = fast_high_order_act(X1, self.params)
-        Y1 = sparsemm_high_order_act(X1, self.params)
+        Y1 = fast_high_order_act(X1, self.params)
+        # Y1 = sparsemm_high_order_act(X1, self.params)
         Y_shape = list(X.shape)
         Y_shape[0] = -1
         Y_shape[-1] = self.out_dim
