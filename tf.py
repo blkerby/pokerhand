@@ -29,227 +29,69 @@ def make_model():
     # bias_scale = 0.1
     # slope_scale = 1.0
     # init_slope = 1.0
-    # model = tf.keras.Sequential([
-    #     tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
-    #     tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
-    #     RandomElasticDistortion(3, 0.5),
-    #     # tf.keras.layers.experimental.preprocessing.RandomTranslation(0.05, 0.05, fill_mode='constant'),
-    #     # tf.keras.layers.Dropout(0.1),
-    #     # tf.keras.layers.Conv2D(32, [5, 5], strides=2, activation='relu'),
-    #     # tf.keras.layers.Conv2D(32, [5, 5], strides=2),
-    #     tf.keras.layers.Conv2D(32, [5, 5]),
-    #     # tf.keras.layers.Dropout(0.1),
-    #     tf.keras.layers.BatchNormalization(momentum=0.0),
-    #     LeakyReLU(bias_scale, slope_scale, init_slope),
-    #     # tf.keras.layers.PReLU(),
-    #     # tf.keras.layers.Activation(tf.nn.relu),
-    #     # tf.keras.layers.Activation(tf.math.atan),
-    #     tf.keras.layers.MaxPool2D(),
-    #     # tf.keras.layers.Dropout(0.1),
-    #     # tf.keras.layers.Conv2D(32, [3, 3], strides=2, activation='relu'),
-    #     # tf.keras.layers.Conv2D(32, [3, 3], strides=2),
-    #     tf.keras.layers.Conv2D(32, [3, 3]),
-    #     # tf.keras.layers.Dropout(0.1),
-    #     tf.keras.layers.BatchNormalization(momentum=0.0),
-    #     # tf.keras.layers.PReLU(),
-    #     # tf.keras.layers.Activation(tf.nn.relu),
-    #     # tf.keras.layers.Activation(tf.math.atan),
-    #     LeakyReLU(bias_scale, slope_scale, init_slope),
-    #     tf.keras.layers.MaxPool2D(),
-    #     # tf.keras.layers.Conv2D(16, [3, 3], strides=2, activation='relu'),
-    #     # tf.keras.layers.Dense(32, activation='relu'),
-    #     # tf.keras.layers.DepthwiseConv2D([3, 3], strides=2, depth_multiplier=1, activation='relu'),
-    #     # tf.keras.layers.Conv2D(32, [3, 3], strides=2, activation='relu'),
-    #     # tfa.layers.Maxout(16),
-    #     # tf.keras.layers.Conv2D(32, [4, 4], activation='relu', kernel_constraint=L1BallConstraint(axes=[0, 1, 2], num_iters=6, memory=False)),
-    #     # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
-    #     # tf.keras.layers.Dropout(0.1),
-    #     # tf.keras.layers.Conv2D(32, [5, 5], strides=2, activation='relu'),
-    #     # tf.keras.layers.Conv2D(32, [3, 3], activation='relu'),
-    #     # tfa.layers.Maxout(16),
-    #     # tf.keras.layers.Conv2D(32, [5, 5], strides=2, activation='relu'),
-    #     # tf.keras.layers.Conv2D(32, [5, 5], activation='relu', kernel_constraint=L1BallConstraint(axes=[0, 1, 2], num_iters=6, memory=False)),
-    #     # tf.keras.layers.MaxPool2D(),
-    #     # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
-    #     # tf.keras.layers.GlobalMaxPool2D(),
-    #     # tf.keras.layers.Conv2D(16, [3, 3], activation='relu'),
-    #     tf.keras.layers.Flatten(),
-    #     # tf.keras.layers.Dropout(0.1),
-    #     # tf.keras.layers.Dense(128, activation='relu'),
-    #     tf.keras.layers.Dense(256),
-    #     tf.keras.layers.BatchNormalization(momentum=0.0),
-    #     LeakyReLU(bias_scale, slope_scale, init_slope),
-    #     tf.keras.layers.Dense(256),
-    #     tf.keras.layers.BatchNormalization(momentum=0.0),
-    #     LeakyReLU(bias_scale, slope_scale, init_slope),
-    #     tf.keras.layers.Dense(10),
-    #     # tf.keras.layers.Dense(10, kernel_constraint=L1BallConstraint(axes=[0], num_iters=6, memory=False)),
-    #     # tf.keras.layers.BatchNormalization(momentum=0.0, renorm=True),
-    #     # Scaling(factor=2000.0),
-    # ])(inp)
-
-    # model = tf.keras.Sequential([
-    #     tf.keras.layers.Flatten(),
-    #     tf.keras.layers.Dense(256, activation='relu'),
-    #     # tf.keras.layers.Dropout(0.2),
-    #     tf.keras.layers.Dense(256, activation='relu'),
-    #     # tf.keras.layers.Dropout(0.2),
-    #     tf.keras.layers.Dense(256, activation='relu'),
-    #     # tf.keras.layers.Dropout(0.2),
-    #     tf.keras.layers.Dense(10),
-    # ])
-
-    # pen_coef = 0.0  # 1e-6
-    # pen_exp = 2.0
-    # # scale_factor = 4.0
-    # model = tf.keras.Sequential([
-    #     # tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
-    #     # tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
-    #     # RandomElasticDistortion(3, 0.5),
-    #     tf.keras.layers.Flatten(),
-    #     L1Dense(128, pen_coef, pen_exp),
-    #     tf.keras.layers.Reshape([-1, 8]),
-    #     HighOrderActivation(8, 8),
-    #     tf.keras.layers.Flatten(),
-    #     L1Dense(128, pen_coef, pen_exp),
-    #     tf.keras.layers.Reshape([-1, 8]),
-    #     HighOrderActivation(8, 8),
-    #     tf.keras.layers.Flatten(),
-    #     L1Dense(128, pen_coef, pen_exp),
-    #     tf.keras.layers.Reshape([-1, 8]),
-    #     HighOrderActivation(8, 8),
-    #     tf.keras.layers.Flatten(),
-    #     # L1Dense(10, pen_coef, pen_exp),
-    #     tf.keras.layers.Dense(10),
-    #     # Scaling(scale_factor, 1.0),
-    # ])
-
-    # bias_scale = 0.1
-    # slope_scale = 1.0
-    # init_slope = 1.0
-    act_l2_pen_coef = 0.1
+    act_l1_pen_coef = 0.0
+    act_l2_pen_coef = 0.0
     pen_coef = 1e-5
     pen_exp = 10.0
-    act_arity = 32
+    act_arity = 10
     model = tf.keras.Sequential([
-        # tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
-        # tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
-        # RandomElasticDistortion(3, 0.5),
-        tf.keras.layers.Conv2D(act_arity, [5, 5], strides=2),
-        # tf.keras.layers.Reshape([12, 12, 1, act_arity]),
-        # BatchHighOrderActivation(act_arity, act_arity),
-        # tf.keras.layers.Reshape([12, 12, act_arity]),
-        tf.keras.layers.ReLU(),
-        tf.keras.layers.Conv2D(act_arity, [5, 5], strides=2),
-        # tf.keras.layers.Reshape([4, 4, 1, act_arity]),
-        # BatchHighOrderActivation(act_arity, act_arity),
-        # tf.keras.layers.Reshape([4, 4, act_arity]),
-        tf.keras.layers.ReLU(),
-        # tf.keras.layers.MaxPool2D(),
+        tf.keras.layers.Conv2D(act_arity, [3, 3], strides=2, kernel_constraint=SimplexConstraint([0, 1, 2], 8, False)),
+        tf.keras.layers.Reshape([13, 13, 1, act_arity]),
+        BatchHighOrderActivation(act_arity, act_arity, l1_pen_coef=act_l1_pen_coef, l2_pen_coef=act_l2_pen_coef),
+        tf.keras.layers.Reshape([13, 13, act_arity]),
+        tf.keras.layers.Conv2D(act_arity, [3, 3], strides=2, kernel_constraint=SimplexConstraint([0, 1, 2], 8, False)),
+        tf.keras.layers.Reshape([6, 6, 1, act_arity]),
+        BatchHighOrderActivation(act_arity, act_arity, l1_pen_coef=act_l1_pen_coef, l2_pen_coef=act_l2_pen_coef),
+        tf.keras.layers.Reshape([6, 6, act_arity]),
         tf.keras.layers.Flatten(),
-        L1Dense(act_arity * 16, pen_coef=pen_coef, pen_exp=pen_exp),
-        # tf.keras.layers.Dense(act_arity * 16),
-        # tf.keras.layers.Reshape([-1, act_arity]),
-        # HighOrderActivation(act_arity, act_arity, l2_pen_coef=act_l2_pen_coef),
-        # HighOrderActivation(act_arity, 10, l2_pen_coef=act_l2_pen_coef),
-        tf.keras.layers.ReLU(),
+        L1Dense(32 * act_arity, pen_coef=pen_coef, pen_exp=pen_exp),
+        tf.keras.layers.Reshape([-1, act_arity]),
+        HighOrderActivation(act_arity, act_arity, l1_pen_coef=act_l1_pen_coef, l2_pen_coef=act_l2_pen_coef),
         tf.keras.layers.Flatten(),
-        # # tf.keras.layers.ReLU(),
-        # L1Dense(128, pen_coef=pen_coef, pen_exp=pen_exp),
-        # tf.keras.layers.Reshape([-1, 8]),
-        # HighOrderActivation(8, 8, l2_pen_coef=act_l2_pen_coef),
-        # # tf.keras.layers.ReLU(),
-        # tf.keras.layers.Flatten(),
         tf.keras.layers.Dense(10),
-        # Bias(),
+        # L1Dense(10, pen_coef=pen_coef, pen_exp=pen_exp),
     ])
 
-    # pen_coef = 0.0  # 1e-6
-    # pen_exp = 2.0
-    # # scale_factor = 4.0
+    # # bias_scale = 0.1
+    # # slope_scale = 1.0
+    # # init_slope = 1.0
+    # act_l2_pen_coef = 0.1
+    # pen_coef = 1e-5
+    # pen_exp = 10.0
+    # act_arity = 32
     # model = tf.keras.Sequential([
     #     # tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
     #     # tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
     #     # RandomElasticDistortion(3, 0.5),
+    #     tf.keras.layers.Conv2D(act_arity, [5, 5], strides=2),
+    #     # tf.keras.layers.Reshape([12, 12, 1, act_arity]),
+    #     # BatchHighOrderActivation(act_arity, act_arity),
+    #     # tf.keras.layers.Reshape([12, 12, act_arity]),
+    #     tf.keras.layers.ReLU(),
+    #     tf.keras.layers.Conv2D(act_arity, [5, 5], strides=2),
+    #     # tf.keras.layers.Reshape([4, 4, 1, act_arity]),
+    #     # BatchHighOrderActivation(act_arity, act_arity),
+    #     # tf.keras.layers.Reshape([4, 4, act_arity]),
+    #     tf.keras.layers.ReLU(),
+    #     # tf.keras.layers.MaxPool2D(),
     #     tf.keras.layers.Flatten(),
-    #     # tf.keras.layers.Dense(256),
-    #     L1Dense(256, pen_coef, pen_exp),
-    #     tf.keras.layers.Reshape([-1, 8]),
-    #     HighOrderActivation(8, 16),
+    #     L1Dense(act_arity * 16, pen_coef=pen_coef, pen_exp=pen_exp),
+    #     # tf.keras.layers.Dense(act_arity * 16),
+    #     # tf.keras.layers.Reshape([-1, act_arity]),
+    #     # HighOrderActivation(act_arity, act_arity, l2_pen_coef=act_l2_pen_coef),
+    #     # HighOrderActivation(act_arity, 10, l2_pen_coef=act_l2_pen_coef),
+    #     tf.keras.layers.ReLU(),
     #     tf.keras.layers.Flatten(),
-    #     # tf.keras.layers.Dense(128),
-    #     L1Dense(128, pen_coef, pen_exp),
-    #     tf.keras.layers.Reshape([-1, 8]),
-    #     HighOrderActivation(8, 16),
-    #     tf.keras.layers.Flatten(),
-    #     # tf.keras.layers.Dense(128),
-    #     L1Dense(128, pen_coef, pen_exp),
-    #     tf.keras.layers.Reshape([-1, 8]),
-    #     HighOrderActivation(8, 16),
-    #     tf.keras.layers.Flatten(),
-    #     # L1PoDense(10, pen_coef, pen_exp),
+    #     # # tf.keras.layers.ReLU(),
+    #     # L1Dense(128, pen_coef=pen_coef, pen_exp=pen_exp),
+    #     # tf.keras.layers.Reshape([-1, 8]),
+    #     # HighOrderActivation(8, 8, l2_pen_coef=act_l2_pen_coef),
+    #     # # tf.keras.layers.ReLU(),
+    #     # tf.keras.layers.Flatten(),
     #     tf.keras.layers.Dense(10),
-    #     # Scaling(scale_factor, 1.0),
+    #     # Bias(),
     # ])
 
-    # model = tf.keras.Sequential([
-    #     tf.keras.layers.Flatten(),
-    #     L1Dense(256),
-    #     tf.keras.layers.ReLU(),
-    #     L1Dense(256),
-    #     tf.keras.layers.ReLU(),
-    #     L1Dense(256),
-    #     tf.keras.layers.ReLU(),
-    #     L1Dense(10),
-    #     Scaling(200.0, 1.0),
-    #     # tf.keras.layers.Dense(10),
-    # ])
-    # pen_coef = 2e-7
-    # pen_exp = 10
-    # scale_factor = 4.0
-    # model = tf.keras.Sequential([
-    #     # tf.keras.layers.experimental.preprocessing.RandomRotation(0.05, fill_mode='constant'),
-    #     # tf.keras.layers.experimental.preprocessing.RandomZoom(0.1, fill_mode='constant'),
-    #     # RandomElasticDistortion(3, 0.5),
-    #     tf.keras.layers.Flatten(),
-    #     L1Dense(1024, pen_coef, pen_exp),
-    #     Scaling(scale_factor, 1.0),
-    #     tfa.layers.Maxout(256),
-    #     # tf.keras.layers.ReLU(),
-    #     L1Dense(1024, pen_coef, pen_exp),
-    #     Scaling(scale_factor, 1.0),
-    #     tfa.layers.Maxout(256),
-    #     # tf.keras.layers.ReLU(),
-    #     L1Dense(1024, pen_coef, pen_exp),
-    #     Scaling(scale_factor, 1.0),
-    #     tfa.layers.Maxout(256),
-    #     # tf.keras.layers.ReLU(),
-    #     L1Dense(1024, pen_coef, pen_exp),
-    #     Scaling(scale_factor, 1.0),
-    #     tfa.layers.Maxout(256),
-    #     # tf.keras.layers.ReLU(),
-    #     L1Dense(1024, pen_coef, pen_exp),
-    #     Scaling(scale_factor, 1.0),
-    #     tfa.layers.Maxout(256),
-    #     # tf.keras.layers.ReLU(),
-    #     # L1BallDense(256),
-    #     # tfa.layers.Maxout(128),
-    #     # tf.keras.layers.ReLU(),
-    #     L1Dense(10, pen_coef, pen_exp),
-    #     # tf.keras.layers.Dense(10),
-    #     Scaling(scale_factor, 1.0),
-    # ])
-    # model = tf.keras.Sequential([
-    #     tf.keras.layers.Flatten(),
-    #     tf.keras.layers.Dense(10),
-    # ])
-    # pen_coef = 5e-6
-    # pen_eps = 1e-3
-    # model = tf.keras.Sequential([
-    #     tf.keras.layers.Flatten(),
-    #     L1Dense(10, pen_coef, pen_eps),
-    #     Scaling(10000.0, 1.0),
-    # ])
     return model
 
 
@@ -298,7 +140,7 @@ loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 # optimizer = AdaBeliefOptimizer(learning_rate=0.0005, beta_1=0.995, beta_2=0.995)
 
 
-optimizers = [tf.keras.optimizers.Adam(learning_rate=0.01, beta_1=0.99, beta_2=0.999, epsilon=1e-07, amsgrad=False)
+optimizers = [tf.keras.optimizers.Adam(learning_rate=0.005, beta_1=0.95, beta_2=0.999, epsilon=1e-07, amsgrad=False)
               for _ in range(ensemble_size)]
 
 # optimizers = [AdaBeliefOptimizer(learning_rate=0.005, beta_1=0.995, beta_2=0.999, rectify=False)
