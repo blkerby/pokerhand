@@ -81,10 +81,11 @@ class HighOrderActivation(torch.nn.Module):
         self.params = torch.nn.Parameter(torch.randn([input_groups, 2 ** arity, out_dim]))
 
     def forward(self, X):
-        assert len(X.shape) == 3
-        assert X.shape[1] == self.input_groups
-        assert X.shape[2] == self.arity
-        return high_order_act(X, self.params)
+        assert len(X.shape) == 2
+        assert X.shape[0] == self.input_groups * self.arity
+        X1 = torch.transpose(X, 0, 1).view(X.shape[1], self.input_groups, self.arity)
+        out1 = high_order_act(X1, self.params)
+        return torch.transpose(out1.view(X.shape[1], self.input_groups * self.out_dim), 0, 1)
 
 
 class HighOrderActivationB(torch.nn.Module):
@@ -96,10 +97,11 @@ class HighOrderActivationB(torch.nn.Module):
         self.params = torch.nn.Parameter(torch.randn([input_groups, 3 ** arity, out_dim]))
 
     def forward(self, X):
-        assert len(X.shape) == 3
-        assert X.shape[1] == self.input_groups
-        assert X.shape[2] == self.arity
-        return high_order_act_b(X, self.params)
+        assert len(X.shape) == 2
+        assert X.shape[0] == self.input_groups * self.arity
+        X1 = torch.transpose(X, 0, 1).view(X.shape[1], self.input_groups, self.arity)
+        out1 = high_order_act_b(X1, self.params)
+        return torch.transpose(out1.view(X.shape[1], self.input_groups * self.out_dim), 0, 1)
 
 
 # m = 4
@@ -115,17 +117,43 @@ class HighOrderActivationB(torch.nn.Module):
 # ])
 # out = fast_high_order_act(A, params)
 
-m = 4
-n = 3
-k = 2
-params = torch.randn([k, 3 ** n, 5])
-# A = torch.randn([m, k, n])
-A = torch.tensor([
-    [[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]],
-    [[0.0, -1.0, -1.0], [0.0, -1.0, -1.0]],
-    [[1.0, -1.0, -1.0], [1.0, -1.0, -1.0]],
-    [[-1.0, 0.0, -1.0], [-1.0, 0.0, -1.0]],
+# m = 4
+# n = 3
+# k = 2
+# params = torch.randn([k, 3 ** n, 5])
+# # A = torch.randn([m, k, n])
+# A = torch.tensor([
+#     [[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]],
+#     [[0.0, -1.0, -1.0], [0.0, -1.0, -1.0]],
+#     [[1.0, -1.0, -1.0], [1.0, -1.0, -1.0]],
+#     [[-1.0, 0.0, -1.0], [-1.0, 0.0, -1.0]],
+#
+# ])
+# # out = high_order_act(A, params)
+# out = high_order_act_b(A, params)
 
-])
+
+#
+# m = 1
+# k = 1
+# n = 6
+# params = torch.randn([k, 3 ** n, 2])
+# # A = torch.randn[m, k, n])
+# A1 = torch.randn([1, k, n])
+# A2 = torch.randn([1, k, n])
+# t = torch.unsqueeze(torch.unsqueeze(torch.linspace(0.0, 1.0, 100), 1), 2)
+# A = t * A1 + (1 - t) * A2
+# #
+# # A = torch.tensor([
+# #     [[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]],
+# #     [[0.0, -1.0, -1.0], [0.0, -1.0, -1.0]],
+# #     [[1.0, -1.0, -1.0], [1.0, -1.0, -1.0]],
+# #     [[-1.0, 0.0, -1.0], [-1.0, 0.0, -1.0]],
+# #
+# # ])
 # out = high_order_act(A, params)
-out = high_order_act_b(A, params)
+# # out = high_order_act_b(A, params)
+#
+# import matplotlib.pyplot as plt
+# plt.plot(out[:, 0, 0], out[:, 0, 1], '.-')
+# plt.show()
