@@ -157,3 +157,11 @@ class HighOrderActivationB(torch.nn.Module):
 # import matplotlib.pyplot as plt
 # plt.plot(out[:, 0, 0], out[:, 0, 1], '.-')
 # plt.show()
+
+#
+# m = 100
+# k = 2
+# n = 4
+# A = torch.randn([k * n, m])
+# act = HighOrderActivation(n, k, 5)
+# out = act(A)
