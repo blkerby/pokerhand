@@ -5,6 +5,7 @@ import pandas as pd
 import sklearn.preprocessing
 import sklearn.metrics
 import logging
+import moe_pytorch
 
 logging.basicConfig(format="%(asctime)s: %(message)s", level=logging.INFO)
 
@@ -125,51 +126,56 @@ class PReLU(torch.nn.Module):
         self.bias = torch.nn.Parameter(torch.zeros([width], dtype=dtype, device=device))
 
     def forward(self, X):
-        delta = X - self.position.view(-1, 1)
-        return self.bias.view(-1, 1) + torch.where(delta >= 0,
-                                                   delta * self.right_slope.view(-1, 1),
-                                                   delta * self.left_slope.view(-1, 1))
+        delta = X - self.position.view(1, -1)
+        return self.bias.view(1, -1) + torch.where(delta >= 0,
+                                                   delta * self.right_slope.view(1, -1),
+                                                   delta * self.left_slope.view(1, -1))
 
 
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
-                 min_arity: int,
-                 max_arity: int,
-                 init_scale: float,
-                 std_scale: float,
+                 num_experts: int,
+                 selection_size: int,
                  dtype=torch.float32,
                  device=None):
         super().__init__()
         self.widths = widths
         self.depth = len(widths) - 1
-        self.lin_layers = torch.nn.ModuleList([])
-        self.act_layers = torch.nn.ModuleList([])
-        self.std_scale = std_scale
-        # self.scale = torch.nn.Parameter(torch.full([], init_scale / std_scale, dtype=dtype, device=device))
+        # self.lin_layers = torch.nn.ModuleList([])
+        self.gate_layers = torch.nn.ModuleList([])
+        self.expert_layers = torch.nn.ModuleList([])
+        # self.act_layers = torch.nn.ModuleList([])
         for i in range(self.depth):
-            self.lin_layers.append(
-                L1Linear(widths[i], min_arity * max_arity * widths[i + 1], dtype=dtype, device=device))
-            # self.act_layers.append(SoftMaxout(widths[i + 1], min_arity * max_arity))
-            # self.act_layers.append(MinMaxout(widths[i + 1], min_arity, max_arity))
-            # self.act_layers.append(Multiplier(widths[i + 1]))
-            self.act_layers.append(PReLU(widths[i + 1], dtype=dtype, device=device))
+            lin = torch.nn.Linear(widths[i], num_experts)
+            lin.weight.data.zero_()
+            lin.bias.data.zero_()
+            self.gate_layers.append(lin)
+            experts = torch.nn.ModuleList([])
+            for _ in range(num_experts):
+                experts.append(torch.nn.Sequential(
+                    torch.nn.Linear(widths[i], widths[i + 1]),
+                    PReLU(widths[i + 1], dtype=dtype, device=device)
+                ))
+            self.expert_layers.append(moe_pytorch.MixtureOfExperts(experts, selection_size))
+            # self.act_layers.append(PReLU(widths[i + 1], dtype=dtype, device=device))
             # self.act_layers.append(ReLU(widths[i + 1], dtype=dtype, device=device))
 
     def forward(self, X):
         for i in range(self.depth):
-            # X = X * (self.scale * self.std_scale)
-            X = self.lin_layers[i](X)
-            X = self.act_layers[i](X)
+            G = self.gate_layers[i](X)
+            X = self.expert_layers[i](X, G)
+            # X = self.lin_layers[i](X)
+            # X = self.act_layers[i](X)
         return X
 
 
 def compute_loss(P, Y):
-    return torch.nn.functional.cross_entropy(P.t(), Y)
+    return torch.nn.functional.cross_entropy(P, Y)
 
 
 def compute_accuracy(P, Y):
-    P_max = torch.argmax(P, dim=0)
+    P_max = torch.argmax(P, dim=1)
     return torch.mean((P_max == Y).to(torch.float32))
 
 
@@ -185,20 +191,18 @@ raw_test_X, test_Y = load_data('~/nn/datasets/poker/poker-hand-testing.data')
 
 scaler = sklearn.preprocessing.StandardScaler()
 scaler.fit(raw_train_X.T)
-train_X = torch.from_numpy(scaler.transform(raw_train_X.T).T).to(torch.float32)
-test_X = torch.from_numpy(scaler.transform(raw_test_X.T).T).to(torch.float32)
+train_X = torch.from_numpy(scaler.transform(raw_train_X.T)).to(torch.float32)
+test_X = torch.from_numpy(scaler.transform(raw_test_X.T)).to(torch.float32)
 
 ensemble_size = 4
-networks = [Network(widths=[10] + [20, 20, 20] + [10],
-                    min_arity=1,
-                    max_arity=1,
-                    init_scale=1.0,
-                    std_scale=5.0,
+networks = [Network(widths=[10] + [8, 8, 8] + [10],
+                    num_experts=4,
+                    selection_size=2,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
 
-optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.015, betas=(0.4, 0.4))
+optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.01, betas=(0.99, 0.99))
               for i in range(ensemble_size)]
 
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.003, betas=(0.5, 0.5))
@@ -207,7 +211,7 @@ optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.015, betas=(0.4, 0
 logging.info(optimizers[0])
 
 average_params = [[torch.zeros_like(p) for p in net.parameters()] for net in networks]
-average_param_beta = 0.98
+average_param_beta = 0.99  # 0.98
 average_param_weight = 0.0
 epoch = 1
 
@@ -224,7 +228,8 @@ for _ in range(1, 50001):
         train_loss = compute_loss(P, train_Y)
         train_loss.backward()
         total_loss += float(train_loss)
-        # optimizers[j].param_groups[0]['lr'] = 0.02
+        # optimizers[j].param_groups[0]['lr'] = 0.01
+        # optimizers[j].param_groups[0]['betas'] = (0.995, 0.995)
         optimizers[j].step()
         with torch.no_grad():
             # for mod in net.modules():

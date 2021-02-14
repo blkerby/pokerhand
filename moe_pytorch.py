@@ -47,8 +47,8 @@ class MixtureOfExperts(torch.nn.Module):
         Y = torch.einsum('ij,ijk->ik', normalized_weights, expert_Y.view(n_rows, self.selection_size, cat_Y.shape[1]))
         return Y
 
-
-# arr = torch.randint(high=10, size=[10])
+#
+# # arr = torch.randint(high=10, size=[10])
 N = 6
 in_dim = 3
 out_dim = 4
@@ -56,6 +56,7 @@ num_experts = 5
 selection_size = 2
 X = torch.randn(N, in_dim)
 G = torch.randn(N, num_experts)
+G[5, 4] = 10
 experts = [torch.nn.Linear(in_dim, out_dim) for _ in range(num_experts)]
 moe = MixtureOfExperts(experts, selection_size)
 Y = moe(X, G)
