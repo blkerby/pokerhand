@@ -1,11 +1,12 @@
 import torch
-from typing import List
+from typing import List, Optional
 import numpy as np
 import pandas as pd
 import sklearn.preprocessing
 import sklearn.metrics
 import logging
-import moe_pytorch
+# import moe_pytorch
+import sparselin_pytorch
 
 logging.basicConfig(format="%(asctime)s: %(message)s", level=logging.INFO)
 
@@ -135,38 +136,22 @@ class PReLU(torch.nn.Module):
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
-                 num_experts: int,
-                 selection_size: int,
+                 sparse_output: Optional[int],
                  dtype=torch.float32,
                  device=None):
         super().__init__()
         self.widths = widths
         self.depth = len(widths) - 1
-        # self.lin_layers = torch.nn.ModuleList([])
-        self.gate_layers = torch.nn.ModuleList([])
-        self.expert_layers = torch.nn.ModuleList([])
-        # self.act_layers = torch.nn.ModuleList([])
+        self.lin_layers = torch.nn.ModuleList([])
+        self.act_layers = torch.nn.ModuleList([])
         for i in range(self.depth):
-            lin = torch.nn.Linear(widths[i], num_experts)
-            lin.weight.data.zero_()
-            lin.bias.data.zero_()
-            self.gate_layers.append(lin)
-            experts = torch.nn.ModuleList([])
-            for _ in range(num_experts):
-                experts.append(torch.nn.Sequential(
-                    torch.nn.Linear(widths[i], widths[i + 1]),
-                    PReLU(widths[i + 1], dtype=dtype, device=device)
-                ))
-            self.expert_layers.append(moe_pytorch.MixtureOfExperts(experts, selection_size))
-            # self.act_layers.append(PReLU(widths[i + 1], dtype=dtype, device=device))
-            # self.act_layers.append(ReLU(widths[i + 1], dtype=dtype, device=device))
+            self.lin_layers.append(sparselin_pytorch.SparseLinear(widths[i], widths[i + 1], sparse_output=sparse_output, dtype=dtype, device=device))
+            self.act_layers.append(PReLU(widths[i + 1], dtype=dtype, device=device))
 
     def forward(self, X):
         for i in range(self.depth):
-            G = self.gate_layers[i](X)
-            X = self.expert_layers[i](X, G)
-            # X = self.lin_layers[i](X)
-            # X = self.act_layers[i](X)
+            X = self.lin_layers[i](X)
+            X = self.act_layers[i](X)
         return X
 
 
@@ -194,15 +179,14 @@ scaler.fit(raw_train_X.T)
 train_X = torch.from_numpy(scaler.transform(raw_train_X.T)).to(torch.float32)
 test_X = torch.from_numpy(scaler.transform(raw_test_X.T)).to(torch.float32)
 
-ensemble_size = 4
-networks = [Network(widths=[10] + [8, 8, 8] + [10],
-                    num_experts=4,
-                    selection_size=2,
+ensemble_size = 1
+networks = [Network(widths=[10] + [32, 32, 32] + [10],
+                    sparse_output=8,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
 
-optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.01, betas=(0.99, 0.99))
+optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.05, betas=(0.99, 0.99))
               for i in range(ensemble_size)]
 
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.003, betas=(0.5, 0.5))
@@ -211,7 +195,7 @@ optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.01, betas=(0.99, 0
 logging.info(optimizers[0])
 
 average_params = [[torch.zeros_like(p) for p in net.parameters()] for net in networks]
-average_param_beta = 0.99  # 0.98
+average_param_beta = 0.98
 average_param_weight = 0.0
 epoch = 1
 
