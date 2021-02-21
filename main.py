@@ -9,11 +9,11 @@ import logging
 import sparselin_pytorch
 import math
 
-
 logging.basicConfig(format='%(asctime)s %(message)s',
                     level=logging.INFO,
                     handlers=[logging.FileHandler("pokerhand.log"),
                               logging.StreamHandler()])
+
 
 def approx_simplex_projection(x: torch.tensor, dim: int, num_iters: int) -> torch.tensor:
     mask = torch.ones(list(x.shape), dtype=x.dtype, device=x.device)
@@ -29,7 +29,7 @@ def approx_simplex_projection(x: torch.tensor, dim: int, num_iters: int) -> torc
     t = (x_sum - 1.0) / n_act
     x1 = torch.clamp(x - t.unsqueeze(dim=dim), min=0.0)
     # logging.info(torch.mean(torch.sum(x1, dim=1)))
-    return x1  #/ torch.sum(torch.abs(x1), dim=dim).unsqueeze(dim=dim)
+    return x1  # / torch.sum(torch.abs(x1), dim=dim).unsqueeze(dim=dim)
 
 
 class ManifoldModule(torch.nn.Module):
@@ -52,190 +52,113 @@ class Simplex(ManifoldModule):
 
 
 class L1Linear(torch.nn.Module):
-    def __init__(self, input_width, output_width, dtype=torch.float32, device=None, num_iters=6):
+    def __init__(self, input_width, output_width, pen_coef=0.0, pen_exp=2.0, dtype=torch.float32, device=None,
+                 num_iters=6):
         super().__init__()
         self.input_width = input_width
         self.output_width = output_width
+        self.pen_coef = pen_coef
+        self.pen_exp = pen_exp
         self.weights_pos_neg = Simplex([input_width * 2, output_width], dim=0, dtype=dtype, device=device,
                                        num_iters=num_iters)
-        # self.scale_factor = scale_factor
-        # init_scale = math.sqrt(input_width)
-        # self.scale = torch.nn.Parameter(torch.full([output_width], init_scale / scale_factor, dtype=dtype, device=device))
-        self.bias = torch.nn.Parameter(torch.zeros([output_width], dtype=dtype, device=device))
 
     def forward(self, X):
         weights = self.weights_pos_neg.param[:self.input_width, :] - self.weights_pos_neg.param[self.input_width:, :]
         assert X.shape[1] == self.input_width
-        # return torch.matmul(X, weights) * (self.scale.view(1, -1) * self.scale_factor) + self.bias.view(1, -1)
-        return torch.matmul(X, weights) + self.bias.view(1, -1)
+        return torch.matmul(X, weights)
 
-    def penalty(self, pen_exp):
+    def penalty(self):
         p = self.weights_pos_neg.param
-        return torch.mean(1 - (1 - p) ** pen_exp - p)
+        return self.pen_coef * torch.mean(1 - (1 - p) ** self.pen_exp - p)
 
-class Maxout(torch.nn.Module):
-    def __init__(self, width, arity):
+
+class HardSigmoid(torch.nn.Module):
+    def __init__(self, width: int,
+                 init_scale: float,
+                 init_bias: float,
+                 pen_act_coef: float,
+                 pen_act_target_frac: float,
+                 pen_sat_coef: float,
+                 pen_sat_target_frac: float,
+                 dtype=torch.float32,
+                 device=None):
         super().__init__()
-        self.width = width
-        self.arity = arity
+        self.pen_act_coef = pen_act_coef
+        self.pen_act_target_frac = pen_act_target_frac
+        self.pen_sat_coef = pen_sat_coef
+        self.pen_sat_target_frac = pen_sat_target_frac
+        self.bias = torch.nn.Parameter(torch.full([width], init_bias, dtype=dtype, device=device))
+        self.scale = torch.nn.Parameter(torch.full([width], init_scale, dtype=dtype, device=device))
 
     def forward(self, X):
-        X1 = X.view(self.width, self.arity, X.shape[1])
-        return torch.max(X1, dim=1)[0]
-
-
-# class MinMaxout(torch.nn.Module):
-#     def __init__(self, width, min_arity, max_arity):
-#         super().__init__()
-#         self.width = width
-#         self.min_arity = min_arity
-#         self.max_arity = max_arity
-#
-#     def forward(self, X):
-#         X1 = X.view(X.shape[0], self.width, self.min_arity, self.max_arity)
-#         return torch.max(torch.min(X1, dim=2)[0], dim=2)[0]
-
-class Minout(torch.nn.Module):
-    def __init__(self, width, min_arity):
-        super().__init__()
-        self.width = width
-        self.min_arity = min_arity
-
-    def forward(self, X):
-        X1 = X.view(X.shape[0], self.width, self.min_arity)
-        return torch.min(X1, dim=2)[0]
-
-
-class SoftMaxout(torch.nn.Module):
-    def __init__(self, width, arity):
-        super().__init__()
-        self.width = width
-        self.arity = arity
-
-    def forward(self, X):
-        X1 = X.view(self.width, self.arity, X.shape[1])
-        Xm = torch.softmax(X1, dim=1)
-        return torch.sum(X1 * Xm, dim=1)
-        # return torch.max(torch.min(X1, dim=1)[0], dim=1)[0]
-
-
-class Multiplier(torch.nn.Module):
-    def __init__(self, width):
-        super().__init__()
-        self.width = width
-
-    def forward(self, X):
-        X1 = X[:self.width, :]
-        X2 = X[self.width:, :]
-        return X1 * torch.sigmoid(X2)
-
-
-class ReSigmoid(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, X):
-        # out = torch.asinh(torch.clamp(X, min=0))
-        # out = torch.sqrt(torch.clamp(X, min=0) + 0.25) - 0.5
-        # out = 1 - 1 / (1 + torch.clamp(X, min=0))
-        out = torch.clamp(X, min=0.0, max=1.0)
-        self.frac_nonzero = float(torch.sum(out != 0.0)) / float(X.shape[0] * X.shape[1])
-        self.mean_act = torch.mean(out)
+        self.X_scaled = (X + self.bias.view(1, -1)) * self.scale.view(1, -1)
+        out = torch.clamp(self.X_scaled, min=0.0, max=1.0)
+        self.cnt_rows = X.shape[0]
+        self.cnt_act = torch.sum(self.X_scaled >= 0.0, dim=0)
+        self.cnt_sat = torch.sum(self.X_scaled >= 1.0, dim=0)
         return out
 
-class ReLU(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, X):
-        out = torch.clamp(X, min=0)
-        self.frac_nonzero = float(torch.sum(out != 0.0)) / float(X.shape[0] * X.shape[1])
-        self.mean_act = torch.mean(out)
-        self.mean_sat = torch.mean(out - X)
-        return out
-
-class PReLU(torch.nn.Module):
-    def __init__(self, width, dtype=torch.float32, device=None):
-        super().__init__()
-        self.width = width
-        self.left_slope = torch.nn.Parameter(torch.randn([width], dtype=dtype, device=device))
-        self.right_slope = torch.nn.Parameter(torch.randn([width], dtype=dtype, device=device))
-        # self.position = torch.nn.Parameter(torch.randn([width], dtype=dtype, device=device))
-        self.position = torch.nn.Parameter(torch.zeros([width], dtype=dtype, device=device))
-        # self.bias = torch.nn.Parameter(torch.randn([width], dtype=dtype, device=device))
-        self.bias = torch.nn.Parameter(torch.zeros([width], dtype=dtype, device=device))
-
-    def forward(self, X):
-        delta = X - self.position.view(1, -1)
-        return self.bias.view(1, -1) + torch.where(delta >= 0,
-                                                   delta * self.right_slope.view(1, -1),
-                                                   delta * self.left_slope.view(1, -1))
-
+    def penalty(self):
+        bias_coef = self.pen_act_coef * (
+                self.cnt_act * (1 - self.pen_act_target_frac) - (self.cnt_rows - self.cnt_act) * self.pen_act_target_frac)
+        pen_bias = torch.sum(self.bias * bias_coef)
+        scale_coef = self.pen_sat_coef * (
+                self.cnt_sat * (1 - self.pen_sat_target_frac) - (self.cnt_act - self.cnt_sat) * self.pen_sat_target_frac)
+        pen_scale = torch.sum(self.scale * scale_coef)
+        return pen_bias + pen_scale
+        # pen_act = self.pen_act_coef * (torch.clamp(self.X_scaled, min=0.0) * (1 - self.pen_act_target_frac) - torch.clamp(self.X_scaled, max=0.0) * self.pen_act_target_frac)
+        # pen_sat = self.pen_sat_coef * (torch.clamp(self.X_scaled, min=1.0) * (1 - self.pen_sat_target_frac) - torch.clamp(self.X_scaled, min=0.0, max=1.0) * self.pen_sat_target_frac)
+        # return torch.sum(pen_act) + torch.sum(pen_sat)
 
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
+                 init_scale: float = 1.0,
+                 init_bias: float = 0.0,
                  pen_act_coef: float = 0.0,
+                 pen_act_target_frac: float = 0.5,
                  pen_sat_coef: float = 0.0,
+                 pen_sat_target_frac: float = 0.5,
                  pen_lin_coef: float = 0.0,
                  pen_lin_exp: float = 2.0,
-                 init_scale: float = 1.0,
-                 scale_factor: float = 1.0,
                  dtype=torch.float32,
                  device=None):
         super().__init__()
         self.widths = widths
         self.depth = len(widths) - 1
-        self.pen_act_coef = pen_act_coef
-        self.pen_sat_coef = pen_sat_coef
-        self.pen_lin_coef = pen_lin_coef
-        self.pen_lin_exp = pen_lin_exp
-        self.scale_factor = scale_factor
-        self.scale = torch.nn.Parameter(torch.full([], init_scale / scale_factor, dtype=dtype, device=device))
         self.lin_layers = torch.nn.ModuleList([])
-        self.batch_norm_layers = torch.nn.ModuleList([])
-        # self.min_layers = torch.nn.ModuleList([])
-        self.relu_layers = torch.nn.ModuleList([])
-        # self.scale = torch.nn.Parameter(torch.zeros([widths[-1]], dtype=dtype, device=device))
-        # self.bias = torch.nn.Parameter(torch.zeros([widths[-1]], dtype=dtype, device=device))
+        self.act_layers = torch.nn.ModuleList([])
+        self.output_bias = torch.nn.Parameter(torch.zeros([self.widths[-1]], dtype=dtype, device=device))
+        self.output_scale = torch.nn.Parameter(torch.ones([self.widths[-1]], dtype=dtype, device=device))
         for i in range(self.depth):
-            # self.lin_layers.append(L1Linear(widths[i], widths[i + 1], dtype=dtype, device=device))
-            if i == self.depth - 1:
-                self.lin_layers.append(L1Linear(widths[i], widths[i + 1], dtype=dtype, device=device))
-                self.batch_norm_layers.append(torch.nn.BatchNorm1d(widths[i + 1], momentum=1.0))
-                # self.lin_layers.append(torch.nn.Linear(widths[i], widths[i + 1]))
-            else:
-                self.lin_layers.append(L1Linear(widths[i], widths[i + 1], dtype=dtype, device=device))
-                self.batch_norm_layers.append(torch.nn.BatchNorm1d(widths[i + 1], momentum=1.0))
-                # self.lin_layers.append(torch.nn.Linear(widths[i], widths[i + 1]))
-                # self.min_layers.append(Minout(widths[i + 1], min_arity=min_arity))
-                # self.min_layers.append(MinMaxout(widths[i + 1], min_arity=min_arity, max_arity=1))
-                self.relu_layers.append(ReLU())
-                # self.relu_layers.append(ReSigmoid())
-                # self.act_layers.append(PReLU(widths[i + 1], dtype=dtype, device=device))
+            self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
+                                            pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
+                                            dtype=dtype, device=device))
+            if i != self.depth - 1:
+                self.act_layers.append(HardSigmoid(widths[i + 1],
+                                                    init_scale=init_scale,
+                                                    init_bias=init_bias,
+                                                    pen_act_coef=pen_act_coef,
+                                                    pen_act_target_frac=pen_act_target_frac,
+                                                    pen_sat_coef=pen_sat_coef,
+                                                    pen_sat_target_frac=pen_sat_target_frac,
+                                                    dtype=dtype, device=device))
 
     def forward(self, X):
         for i in range(self.depth):
-            if i == self.depth - 1:
-                X = self.lin_layers[i](X)
-                X = self.batch_norm_layers[i](X)
-            else:
-                X = self.lin_layers[i](X)
-                X = self.batch_norm_layers[i](X)
-                # X = self.min_layers[i](X)
-                X = self.relu_layers[i](X)
-        # X = X * (self.scale.view(1, -1) * self.scale_factor) + self.bias.view(1, -1)
+            X = self.lin_layers[i](X)
+            if i != self.depth - 1:
+                X = self.act_layers[i](X)
+        X = X * self.output_scale.view(1, -1) + self.output_bias.view(1, -1)
         return X
 
     def penalty(self):
-        return sum(layer.mean_act for layer in self.relu_layers) * self.pen_act_coef + \
-               sum(layer.mean_sat for layer in self.relu_layers) * self.pen_sat_coef + \
-               sum(layer.penalty(self.pen_lin_exp) for layer in self.lin_layers) * self.pen_lin_coef
-            #+ \
-               # torch.sum(self.scale ** 2) * self.pen_scale_coef
+        return sum(layer.penalty() for layer in self.act_layers) + \
+               sum(layer.penalty() for layer in self.lin_layers)
+
 
 def compute_loss(P, Y):
-    return torch.nn.functional.cross_entropy(P, Y)
+    return torch.nn.functional.cross_entropy(P, Y, reduction='sum')
 
 
 def compute_accuracy(P, Y):
@@ -260,13 +183,15 @@ test_X = torch.from_numpy(scaler.transform(raw_test_X.T)).to(torch.float32)
 
 ensemble_size = 1
 networks = [Network(widths=[10] + [32, 32, 32] + [10],
-# networks = [Network(widths=[10] + 5 * [32] + [10],
-                    pen_act_coef=0.0,
+                    # networks = [Network(widths=[10] + 5 * [32] + [10],
+                    pen_act_coef=0.0001,
+                    pen_act_target_frac=0.1,
                     pen_sat_coef=0.0,
+                    pen_sat_target_frac=0.5,
                     pen_lin_coef=0.0,
-                    pen_lin_exp=2.0,
-                    scale_factor=2.0,
-                    init_scale=1.0,
+                    pen_lin_exp=5.0,
+                    init_scale=2.0,
+                    init_bias=0.0,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
@@ -275,16 +200,16 @@ _, Y_cnt = torch.unique(train_Y, return_counts=True)
 Y_p = Y_cnt.to(torch.float32) / torch.sum(Y_cnt).to(torch.float32)
 Y_log_p = torch.log(Y_p)
 for net in networks:
-    net.lin_layers[-1].bias.data[:] = Y_log_p
+    net.output_bias.data[:] = Y_log_p
 
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
-lr0 = 0.006
-lr1 = 0.006
+lr0 = 0.005
+lr1 = 0.005
 # grad_max = 1e-6
 optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
               for i in range(ensemble_size)]
-# optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.99)
+# optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.95)
 #               for i in range(ensemble_size)]
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.003, betas=(0.5, 0.5))
 #               for i in range(ensemble_size)]
@@ -292,8 +217,6 @@ optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.
 logging.info(optimizers[0])
 
 average_params = [[torch.zeros_like(p) for p in net.parameters()] for net in networks]
-average_batch_norm_running_mean = [[torch.zeros_like(b._buffers['running_mean']) for b in net.batch_norm_layers] for net in networks]
-average_batch_norm_running_var = [[torch.zeros_like(b._buffers['running_var']) for b in net.batch_norm_layers] for net in networks]
 average_param_beta = 0.98
 average_param_weight = 0.0
 epoch = 1
@@ -304,12 +227,7 @@ with torch.no_grad():
             if isinstance(mod, ManifoldModule):
                 mod.project()
 for _ in range(1, 50001):
-    frac = min(epoch / 1000, 1.0)
-    for j, net in enumerate(networks):
-        net.pen_act_coef = frac * 0.1
-        net.pen_sat_coef = net.pen_act_coef * 0.05
-        net.pen_lin_coef = frac * 0.0
-        optimizers[j].param_groups[0]['lr'] = (1 - frac) * lr0 + frac * lr1
+    frac = min(epoch / 3000, 1.0)
 
     total_loss = 0.0
     total_obj = 0.0
@@ -321,55 +239,26 @@ for _ in range(1, 50001):
         obj = train_loss + net.penalty()
         obj.backward()
 
-        # for layer in networks[0].lin_layers:
-        #     print(torch.norm(layer.weights_pos_neg.param.grad))
-            # print(torch.max(torch.abs(layer.weights_pos_neg.param.grad)), torch.mean(torch.abs(layer.weights_pos_neg.param.grad)))
-        # torch.nn.utils.clip_grad_value_(net.parameters(), 0.002)
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
-        # nms = []
-        # for param in net.parameters():
-        #     if param.grad is not None:
-        #         if len(param.grad.shape) == 2:
-        #             nm = torch.norm(param.grad, dim=0, keepdim=True)
-        #             nms.append(torch.max(nm))
-        #             param.grad.data = torch.where(nm > grad_max, param.grad / (nm / grad_max), param.grad)
-        #         # elif len(param.grad.shape) == 1:
-        #         #     param.grad.data = torch.sign(param.grad)
-        # # print(nms)
 
         total_loss += float(train_loss)
         total_obj += float(obj)
-        # optimizers[j].param_groups[0]['lr'] = lr0 / (1 + epoch / lr_scale)
-        # optimizers[j].param_groups[0]['momentum'] = 0.95
-        # optimizers[j].param_groups[0]['betas'] = (0.95, 0.95)
+        optimizers[j].param_groups[0]['lr'] = lr0 * (1 - frac) + lr1 * frac
         optimizers[j].step()
         with torch.no_grad():
             for mod in net.modules():
                 if isinstance(mod, ManifoldModule):
                     mod.project()
-            # for mod in net.modules():
-                # if isinstance(mod, L1Linear):
-                #     mod.bias.data -= 3e-4
-                # if isinstance(mod, torch.nn.Linear):
-                #     mod.bias.data -= 0.01
             for i, p in enumerate(net.parameters()):
                 average_params[j][i] = average_param_beta * average_params[j][i] + (1 - average_param_beta) * p
-            for i, b in enumerate(net.batch_norm_layers):
-                average_batch_norm_running_mean[j][i] = average_param_beta * average_batch_norm_running_mean[j][i] + (1 - average_param_beta) * b._buffers['running_mean']
-                average_batch_norm_running_var[j][i] = average_param_beta * average_batch_norm_running_var[j][i] + (1 - average_param_beta) * b._buffers['running_var']
         average_param_weight = average_param_beta * average_param_weight + (1 - average_param_beta)
 
     if epoch % 100 == 0:
         with torch.no_grad():
             saved_params = [[p.data.clone() for p in net.parameters()] for net in networks]
-            saved_batch_norm_running_mean = [[b._buffers['running_mean'].clone() for b in net.batch_norm_layers] for net in networks]
-            saved_batch_norm_running_var = [[b._buffers['running_var'].clone() for b in net.batch_norm_layers] for net in networks]
             for j, net in enumerate(networks):
                 for i, p in enumerate(net.parameters()):
                     p.data = average_params[j][i] / average_param_weight
-                for i, b in enumerate(net.batch_norm_layers):
-                    b._buffers['running_mean'].copy_(average_batch_norm_running_mean[j][i] / average_param_weight)
-                    b._buffers['running_var'].copy_(average_batch_norm_running_var[j][i] / average_param_weight)
 
             for net in networks:
                 net.eval()
@@ -380,24 +269,28 @@ for _ in range(1, 50001):
             for j, net in enumerate(networks):
                 for i, p in enumerate(net.parameters()):
                     p.data = saved_params[j][i]
-                for i, b in enumerate(net.batch_norm_layers):
-                    b._buffers['running_mean'].copy_(saved_batch_norm_running_mean[j][i])
-                    b._buffers['running_var'].copy_(saved_batch_norm_running_var[j][i])
 
-            act_nonzero = [layer.frac_nonzero for layer in networks[0].relu_layers]
-            wt_nonzero = [float(torch.sum(layer.weights_pos_neg.param != 0) / (layer.weights_pos_neg.param.view(-1).shape[0]))
-                          for layer in networks[0].lin_layers]
-            bias = [float(torch.mean(layer.bias)) for layer in networks[0].lin_layers]
-            mean_act = [layer.mean_act.tolist() for layer in networks[0].relu_layers]
-            mean_sat = [layer.mean_sat.tolist() for layer in networks[0].relu_layers]
-            logging.info("{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, act_nz={}, wt_nz={}, bias={}, act={}, sat={}".format(
-                epoch, optimizers[0].param_groups[0]['lr'], total_loss / ensemble_size, total_obj / ensemble_size, float(test_loss), float(test_acc),
-                act_nonzero, wt_nonzero, bias, mean_act, mean_sat))
-            # scale = torch.mean(abs(networks[0].scale)) * networks[0].scale_factor
-            # logging.info("{}: train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, scale={:.3f}, act_nz={}, wt_nz={}".format(
-            #     epoch, total_loss / ensemble_size, total_obj / ensemble_size, float(test_loss), float(test_acc),
-            #     scale,
-            #     act_nonzero, wt_nonzero))
+            act_fracs = []
+            for layer in networks[0].act_layers:
+                act_fracs.append(torch.mean(layer.cnt_act.to(torch.float32)) / layer.cnt_rows)
+            act_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_fracs))
+
+            sat_fracs = []
+            for layer in networks[0].act_layers:
+                sat_fracs.append(torch.sum(layer.cnt_sat.to(torch.float32)) / torch.sum(layer.cnt_act))
+            sat_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in sat_fracs))
+
+            wt_fracs = []
+            for layer in networks[0].lin_layers:
+                wt_fracs.append(torch.mean((layer.weights_pos_neg.param > 0).to(torch.float32)))
+            wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
+
+            logging.info(
+                "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, act={}, sat={}, wt={}".format(
+                    epoch, optimizers[0].param_groups[0]['lr'], total_loss / ensemble_size / train_X.shape[0],
+                    total_obj / ensemble_size / train_X.shape[0],
+                    float(test_loss / test_X.shape[0]), float(test_acc),
+                act_fracs_fmt, sat_fracs_fmt, wt_fracs_fmt))
     epoch += 1
 
 torch.set_printoptions(linewidth=120)
