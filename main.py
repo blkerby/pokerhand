@@ -274,18 +274,17 @@ class SAMOptimizer:
         self.rho = rho
 
     def step(self, closure):
-        # Compute the gradient for the current parameters
-        closure()
-
-        # Save the current parameters, and move against the gradient to bring them to the SAM point
+        # # Compute the gradient for the current parameters
+        # closure()
+        #
+        # Save the current parameters, and move in a random direction to get slightly perturbed parameters
         saved_params = []
         for group in self.base_optimizer.param_groups:
             for param in group['params']:
                 saved_params.append(param.data.clone())
-                eps = 1e-15
-                param.data += param.grad * (self.rho / (torch.norm(param.grad) + eps))
+                param.data += self.rho * torch.randn_like(param.data)
 
-        # Compute the gradient at the SAM point
+        # Compute the gradient at the perturbed point
         closure()
 
         # Restore the old parameters
@@ -295,14 +294,14 @@ class SAMOptimizer:
                 param.data = saved_params[i]
                 i += 1
 
-        # Take a step in the SAM direction
+        # Take a step using gradient at the perturbed point
         self.base_optimizer.step()
 
 
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
-lr0 = 0.01
-lr1 = 0.01
+lr0 = 0.005
+lr1 = 0.005
 pen_act0 = 0.0
 pen_act1 = 0.0
 target_act0 = 0.1
@@ -311,7 +310,7 @@ pen_lin_coef0 = 0.0
 pen_lin_coef1 = 0.0
 # grad_max = 1e-6
 optimizers = [
-    SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.5)
+    SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.05)
     for i in range(ensemble_size)]
 # optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.99, 0.99), eps=1e-15)
 #               for i in range(ensemble_size)]
