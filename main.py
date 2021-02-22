@@ -269,32 +269,28 @@ for net in networks:
 
 
 class SAMOptimizer:
-    def __init__(self, sam_optimizer: torch.optim.Optimizer, base_optimizer: torch.optim.Optimizer):
-        self.sam_optimizer = sam_optimizer
+    def __init__(self, base_optimizer: torch.optim.Optimizer, rho: float):
         self.base_optimizer = base_optimizer
+        self.rho = rho
 
     def step(self, closure):
         # Compute the gradient for the current parameters
-        self.sam_optimizer.zero_grad()
         closure()
 
-        # Save the current parameters, and negate their gradients
+        # Save the current parameters, and move against the gradient to bring them to the SAM point
         saved_params = []
-        for group in self.sam_optimizer.param_groups:
+        for group in self.base_optimizer.param_groups:
             for param in group['params']:
                 saved_params.append(param.data.clone())
-                param.grad = -param.grad
+                eps = 1e-15
+                param.data += param.grad * (self.rho / (torch.norm(param.grad) + eps))
 
-        # Take a step in the "wrong" direction (since the gradients were negated) so we can compute the SAM gradient
-        self.sam_optimizer.step()
-
-        # Compute the SAM gradient
-        self.sam_optimizer.zero_grad()
+        # Compute the gradient at the SAM point
         closure()
 
         # Restore the old parameters
         i = 0
-        for group in self.sam_optimizer.param_groups:
+        for group in self.base_optimizer.param_groups:
             for param in group['params']:
                 param.data = saved_params[i]
                 i += 1
@@ -312,11 +308,10 @@ pen_act1 = 0.0
 target_act0 = 0.1
 target_act1 = 0.0
 pen_lin_coef0 = 0.0
-pen_lin_coef1 = 0.01
+pen_lin_coef1 = 0.0
 # grad_max = 1e-6
 optimizers = [
-    SAMOptimizer(sam_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0 * 0.01, betas=(0.95, 0.95), eps=1e-15),
-                 base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15))
+    SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.5)
     for i in range(ensemble_size)]
 # optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.99, 0.99), eps=1e-15)
 #               for i in range(ensemble_size)]
@@ -357,23 +352,28 @@ for _ in range(1, 50001):
     for j, net in enumerate(networks):
         net.train()
 
-
+        step_loss = None
+        step_obj = None
         # optimizers[j].zero_grad()
         def closure():
-            global total_loss
-            global total_obj
+            global step_loss
+            global step_obj
+            net.zero_grad()
             P = net(train_X)
             train_loss = compute_loss(P, train_Y)
             obj = train_loss + net.penalty()
             obj.backward()
-            total_loss += float(train_loss)
-            total_obj += float(obj)
+            if step_loss is None:
+                step_loss = train_loss
+                step_obj = obj
 
 
         # torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
 
         # optimizers[j].param_groups[0]['lr'] = lr0 * (1 - frac) + lr1 * frac
         optimizers[j].step(closure)
+        total_loss += step_loss
+        total_obj += step_obj
         with torch.no_grad():
             for mod in net.modules():
                 if isinstance(mod, ManifoldModule):
@@ -455,7 +455,8 @@ for _ in range(1, 50001):
             wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
 
             # scale = torch.mean(torch.abs(networks[0].output_scale) * networks[0].scale_factor)
-            lr = optimizers[0].sam_optimizer.param_groups[0]['lr']
+            lr = optimizers[0].base_optimizer.param_groups[0]['lr']
+            # lr = optimizers[0].param_groups[0]['lr']
             logging.info(
                 "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, anz={}, wt={}, act={}, grad={}".format(
                     epoch,
