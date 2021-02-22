@@ -193,12 +193,12 @@ class Network(torch.nn.Module):
         for i in range(self.depth):
             layer = torch.nn.Linear(widths[i], widths[i + 1])
             layer.weight.data = torch.randn([widths[i + 1], widths[i]]) / math.sqrt(widths[i] / 2)
-            self.lin_layers.append(layer)
-            # self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
-            #                                 init_bias=init_bias,
-            #                                 init_scale=init_scale,
-            #                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
-            #                                 dtype=dtype, device=device))
+            # self.lin_layers.append(layer)
+            self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
+                                            init_bias=init_bias,
+                                            init_scale=init_scale,
+                                            pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
+                                            dtype=dtype, device=device))
             # bn = torch.nn.BatchNorm1d(widths[i + 1], momentum=1.0)
             # bn.bias.data[:] = init_bias
             # self.bn_layers.append(bn)
@@ -298,6 +298,33 @@ class SAMOptimizer:
         self.base_optimizer.step()
 
 
+class NoisyConnectOptimizer:
+    def __init__(self, base_optimizer: torch.optim.Optimizer, sigma: float):
+        self.base_optimizer = base_optimizer
+        self.sigma = sigma
+
+    def step(self, closure):
+        # Save the current parameters, and multiply by a random number close to 1 to get perturbed parameters
+        saved_params = []
+        for group in self.base_optimizer.param_groups:
+            for param in group['params']:
+                saved_params.append(param.data.clone())
+                param.data *= 1 + self.sigma * torch.randn_like(param.data)
+
+        # Compute the gradient at the perturbed point
+        closure()
+
+        # Restore the old parameters
+        i = 0
+        for group in self.base_optimizer.param_groups:
+            for param in group['params']:
+                param.data = saved_params[i]
+                i += 1
+
+        # Take a step using gradient at the perturbed point
+        self.base_optimizer.step()
+
+
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
 lr0 = 0.005
@@ -310,8 +337,11 @@ pen_lin_coef0 = 0.0
 pen_lin_coef1 = 0.0
 # grad_max = 1e-6
 optimizers = [
-    SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.05)
+    NoisyConnectOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), sigma=0.02)
     for i in range(ensemble_size)]
+# optimizers = [
+#     SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.05)
+#     for i in range(ensemble_size)]
 # optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.99, 0.99), eps=1e-15)
 #               for i in range(ensemble_size)]
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
@@ -448,9 +478,9 @@ for _ in range(1, 50001):
             #     wt_fracs.append(torch.mean((weights != 0).to(torch.float32)))
             wt_fracs = []
             for layer in networks[0].lin_layers:
-                # wt_fracs.append(torch.mean((layer.weights_pos_neg.param > 0).to(torch.float32)))
-                weights = layer.weight
-                wt_fracs.append(torch.mean((weights != 0).to(torch.float32)))
+                wt_fracs.append(torch.mean((layer.weights_pos_neg.param > 0).to(torch.float32)))
+                # weights = layer.weight
+                # wt_fracs.append(torch.mean((weights != 0).to(torch.float32)))
             wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
 
             # scale = torch.mean(torch.abs(networks[0].output_scale) * networks[0].scale_factor)
