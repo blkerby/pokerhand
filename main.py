@@ -56,6 +56,7 @@ class Simplex(ManifoldModule):
     def project(self):
         self.param.data = approx_simplex_projection(self.param.data, dim=self.dim, num_iters=self.num_iters)
 
+
 class L1Ball(ManifoldModule):
     def __init__(self, shape: List[int], dim: int, dtype=torch.float32, device=None, num_iters=8):
         super().__init__()
@@ -155,6 +156,8 @@ class ReLU(torch.nn.Module):
 
     def forward(self, X):
         self.X = X
+        if self.X.requires_grad:
+            self.X.retain_grad()
         out = torch.clamp(X, min=0.0)
         self.cnt_rows = X.shape[0]
         self.cnt_act = torch.sum(X >= 0.0, dim=0)
@@ -164,7 +167,8 @@ class ReLU(torch.nn.Module):
         # bias_coef = self.pen_act * (
         #             self.cnt_act * (1 - self.target_act) - (self.cnt_rows - self.cnt_act) * self.target_act)
         # return torch.sum(self.bias * bias_coef)
-        return self.pen_act * torch.sum(torch.clamp(self.X, min=0.0) * (1 - self.target_act) - torch.clamp(self.X, max=0.0) * self.target_act)
+        return self.pen_act * torch.sum(
+            torch.clamp(self.X, min=0.0) * (1 - self.target_act) - torch.clamp(self.X, max=0.0) * self.target_act)
 
 
 class Network(torch.nn.Module):
@@ -187,11 +191,14 @@ class Network(torch.nn.Module):
         # self.output_bias = torch.nn.Parameter(torch.zeros([self.widths[-1]], dtype=dtype, device=device))
         # self.output_scale = torch.nn.Parameter(torch.full([self.widths[-1]], init_scale / scale_factor, dtype=dtype, device=device))
         for i in range(self.depth):
-            self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
-                                            init_bias=init_bias,
-                                            init_scale=init_scale,
-                                            pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
-                                            dtype=dtype, device=device))
+            layer = torch.nn.Linear(widths[i], widths[i + 1])
+            layer.weight.data = torch.randn([widths[i + 1], widths[i]]) / math.sqrt(widths[i] / 2)
+            self.lin_layers.append(layer)
+            # self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
+            #                                 init_bias=init_bias,
+            #                                 init_scale=init_scale,
+            #                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
+            #                                 dtype=dtype, device=device))
             # bn = torch.nn.BatchNorm1d(widths[i + 1], momentum=1.0)
             # bn.bias.data[:] = init_bias
             # self.bn_layers.append(bn)
@@ -211,8 +218,10 @@ class Network(torch.nn.Module):
         return X
 
     def penalty(self):
-        return sum(layer.penalty() for layer in self.act_layers) + \
-               sum(layer.penalty() for layer in self.lin_layers)
+        return sum(layer.penalty() for layer in self.act_layers)
+
+
+#               sum(layer.penalty() for layer in self.lin_layers)
 
 
 def compute_loss(P, Y):
@@ -243,8 +252,8 @@ ensemble_size = 1
 networks = [Network(widths=[10] + [32, 32, 32] + [10],
                     pen_act=0.0,
                     target_act=0.03,
-                    pen_lin_coef=0.001,
-                    pen_lin_exp=2.0,
+                    pen_lin_coef=0.0,  # 0.001,
+                    pen_lin_exp=5.0,
                     init_bias=0.0,
                     init_scale=1.0,
                     dtype=torch.float32,
@@ -258,17 +267,59 @@ for net in networks:
     # net.output_bias.data[:] = Y_log_p
     net.lin_layers[-1].bias.data[:] = Y_log_p
 
+
+class SAMOptimizer:
+    def __init__(self, sam_optimizer: torch.optim.Optimizer, base_optimizer: torch.optim.Optimizer):
+        self.sam_optimizer = sam_optimizer
+        self.base_optimizer = base_optimizer
+
+    def step(self, closure):
+        # Compute the gradient for the current parameters
+        self.sam_optimizer.zero_grad()
+        closure()
+
+        # Save the current parameters, and negate their gradients
+        saved_params = []
+        for group in self.sam_optimizer.param_groups:
+            for param in group['params']:
+                saved_params.append(param.data.clone())
+                param.grad = -param.grad
+
+        # Take a step in the "wrong" direction (since the gradients were negated) so we can compute the SAM gradient
+        self.sam_optimizer.step()
+
+        # Compute the SAM gradient
+        self.sam_optimizer.zero_grad()
+        closure()
+
+        # Restore the old parameters
+        i = 0
+        for group in self.sam_optimizer.param_groups:
+            for param in group['params']:
+                param.data = saved_params[i]
+                i += 1
+
+        # Take a step in the SAM direction
+        self.base_optimizer.step()
+
+
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
-lr0 = 0.02
-lr1 = 0.002
+lr0 = 0.01
+lr1 = 0.01
 pen_act0 = 0.0
 pen_act1 = 0.0
 target_act0 = 0.1
 target_act1 = 0.0
+pen_lin_coef0 = 0.0
+pen_lin_coef1 = 0.01
 # grad_max = 1e-6
-optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
-              for i in range(ensemble_size)]
+optimizers = [
+    SAMOptimizer(sam_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0 * 0.01, betas=(0.95, 0.95), eps=1e-15),
+                 base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15))
+    for i in range(ensemble_size)]
+# optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.99, 0.99), eps=1e-15)
+#               for i in range(ensemble_size)]
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
 #               for i in range(ensemble_size)]
 # optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.95)
@@ -285,6 +336,8 @@ average_param_beta = 0.98
 average_param_weight = 0.0
 epoch = 1
 
+l1_pen_coef = 0.05
+
 with torch.no_grad():
     for net in networks:
         for mod in net.modules():
@@ -296,27 +349,41 @@ for _ in range(1, 50001):
         for layer in net.act_layers:
             layer.pen_act = frac * pen_act1 + (1 - frac) * pen_act0
             layer.target_act = frac * target_act1 + (1 - frac) * target_act0
+        for layer in net.lin_layers:
+            layer.pen_coef = frac * pen_lin_coef1 + (1 - frac) * pen_lin_coef0
 
     total_loss = 0.0
     total_obj = 0.0
     for j, net in enumerate(networks):
         net.train()
-        optimizers[j].zero_grad()
-        P = net(train_X)
-        train_loss = compute_loss(P, train_Y)
-        obj = train_loss + net.penalty()
-        obj.backward()
 
-        torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
 
-        total_loss += float(train_loss)
-        total_obj += float(obj)
-        optimizers[j].param_groups[0]['lr'] = lr0 * (1 - frac) + lr1 * frac
-        optimizers[j].step()
+        # optimizers[j].zero_grad()
+        def closure():
+            global total_loss
+            global total_obj
+            P = net(train_X)
+            train_loss = compute_loss(P, train_Y)
+            obj = train_loss + net.penalty()
+            obj.backward()
+            total_loss += float(train_loss)
+            total_obj += float(obj)
+
+
+        # torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
+
+        # optimizers[j].param_groups[0]['lr'] = lr0 * (1 - frac) + lr1 * frac
+        optimizers[j].step(closure)
         with torch.no_grad():
             for mod in net.modules():
                 if isinstance(mod, ManifoldModule):
                     mod.project()
+            # for layer in net.lin_layers:
+            #     weight = layer.weight
+            #     weight_sgn = torch.sgn(weight)
+            #     weight_abs = torch.abs(weight)
+            #     lr = optimizers[j].param_groups[0]['lr']
+            #     layer.weight.data[:, :] = weight_sgn * torch.clamp(weight_abs - l1_pen_coef * lr, min=0.0)
             for i, p in enumerate(net.parameters()):
                 average_params[j][i] = average_param_beta * average_params[j][i] + (1 - average_param_beta) * p
             # for i, b in enumerate(net.bn_layers):
@@ -327,6 +394,21 @@ for _ in range(1, 50001):
         average_param_weight = average_param_beta * average_param_weight + (1 - average_param_beta)
 
     if epoch % 100 == 0:
+        act_fracs = []
+        for layer in networks[0].act_layers:
+            act_fracs.append(torch.mean(layer.cnt_act.to(torch.float32)) / layer.cnt_rows)
+        act_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_fracs))
+
+        act_avgs = []
+        for layer in networks[0].act_layers:
+            act_avgs.append(torch.mean(layer.X ** 2))
+        act_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_avgs))
+
+        grad_avgs = []
+        for layer in networks[0].act_layers:
+            grad_avgs.append(torch.mean(layer.X.grad ** 2))
+        grad_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in grad_avgs))
+
         with torch.no_grad():
             saved_params = [[p.data.clone() for p in net.parameters()] for net in networks]
             # saved_batch_norm_running_mean = [[b._buffers['running_mean'].clone() for b in net.bn_layers] for net
@@ -353,31 +435,34 @@ for _ in range(1, 50001):
                 #     b._buffers['running_mean'].copy_(saved_batch_norm_running_mean[j][i])
                 #     b._buffers['running_var'].copy_(saved_batch_norm_running_var[j][i])
 
-            act_fracs = []
-            for layer in networks[0].act_layers:
-                act_fracs.append(torch.mean(layer.cnt_act.to(torch.float32)) / layer.cnt_rows)
-            act_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_fracs))
-
             # sat_fracs = []
             # for layer in networks[0].act_layers:
             #     sat_fracs.append(torch.sum(layer.cnt_sat.to(torch.float32)) / torch.sum(layer.cnt_act))
             # sat_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in sat_fracs))
             #
+
+            # wt_fracs = []
+            # for layer in networks[0].lin_layers:
+            #     # wt_fracs.append(torch.mean((layer.weights_pos_neg.param > 0).to(torch.float32)))
+            #     weights = layer.weights_pos_neg.param[:layer.input_width, :] - \
+            #               layer.weights_pos_neg.param[layer.input_width:, :]
+            #     wt_fracs.append(torch.mean((weights != 0).to(torch.float32)))
             wt_fracs = []
             for layer in networks[0].lin_layers:
                 # wt_fracs.append(torch.mean((layer.weights_pos_neg.param > 0).to(torch.float32)))
-                weights = layer.weights_pos_neg.param[:layer.input_width, :] - \
-                          layer.weights_pos_neg.param[layer.input_width:, :]
+                weights = layer.weight
                 wt_fracs.append(torch.mean((weights != 0).to(torch.float32)))
             wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
 
             # scale = torch.mean(torch.abs(networks[0].output_scale) * networks[0].scale_factor)
+            lr = optimizers[0].sam_optimizer.param_groups[0]['lr']
             logging.info(
-                "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, act={}, wt={}".format(
-                    epoch, optimizers[0].param_groups[0]['lr'], total_loss / ensemble_size / train_X.shape[0],
-                                                                total_obj / ensemble_size / train_X.shape[0],
+                "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, anz={}, wt={}, act={}, grad={}".format(
+                    epoch,
+                    lr, total_loss / ensemble_size / train_X.shape[0],
+                        total_obj / ensemble_size / train_X.shape[0],
                     float(test_loss / test_X.shape[0]), float(test_acc),
-                    act_fracs_fmt, wt_fracs_fmt))
+                    act_fracs_fmt, wt_fracs_fmt, act_avgs_fmt, grad_avgs_fmt))
     epoch += 1
 
 torch.set_printoptions(linewidth=120)
