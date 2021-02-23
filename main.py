@@ -77,12 +77,16 @@ class L1Linear(torch.nn.Module):
     def __init__(self, input_width, output_width,
                  init_scale: float,
                  init_bias: float,
+                 noise_sigma: float,
+                 noise_eps: float,
                  pen_coef=0.0, pen_exp=2.0,
                  dtype=torch.float32, device=None,
                  num_iters=6):
         super().__init__()
         self.input_width = input_width
         self.output_width = output_width
+        self.noise_sigma = noise_sigma
+        self.noise_eps = noise_eps
         self.pen_coef = pen_coef
         self.pen_exp = pen_exp
         self.weights_pos_neg = Simplex([input_width * 2, output_width], dim=0, dtype=dtype, device=device,
@@ -92,11 +96,27 @@ class L1Linear(torch.nn.Module):
         self.bias = torch.nn.Parameter(torch.full([output_width], init_bias, dtype=dtype, device=device))
 
     def forward(self, X):
+        assert X.shape[1] == self.input_width
         self.cnt_rows = X.shape[0]
         weights = self.weights_pos_neg.param[:self.input_width, :] - self.weights_pos_neg.param[self.input_width:, :]
-        # weights = self.weights.param
-        assert X.shape[1] == self.input_width
-        return torch.matmul(X, weights) * self.scale.view(1, -1) + self.bias.view(1, -1)
+        Xw = torch.matmul(X, weights)
+        if self.noise_sigma == 0.0 or not self.training:
+            # print("skipping")
+            Y = Xw
+        else:
+            # weights = raw_weights * (1 + torch.randn_like(raw_weights) * self.noise_sigma)  # Only correct if batch size is 1
+
+            # var = torch.matmul(X ** 2, weights ** 2)
+            # Y = Xw + self.noise_sigma * torch.sqrt(var + self.noise_eps) * torch.randn_like(Xw)
+
+            # std = torch.matmul(torch.abs(X), torch.abs(weights))
+            # Y = Xw + self.noise_sigma * std * torch.randn_like(Xw)
+
+            # Y = Xw * (1 + self.noise_sigma * torch.randn_like(Xw))
+            act = torch.sum(torch.abs(X), dim=1)
+            Y = Xw + self.noise_sigma * act.unsqueeze(1) * torch.randn_like(Xw)
+            # Y = Xw
+        return Y * self.scale.view(1, -1) + self.bias.view(1, -1)
 
     def penalty(self):
         p = self.weights_pos_neg.param
@@ -174,6 +194,8 @@ class ReLU(torch.nn.Module):
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
+                 noise_sigma: float,
+                 noise_eps: float,
                  init_bias: float = 0.0,
                  init_scale: float = 1.0,
                  pen_act: float = 0.0,
@@ -191,13 +213,15 @@ class Network(torch.nn.Module):
         # self.output_bias = torch.nn.Parameter(torch.zeros([self.widths[-1]], dtype=dtype, device=device))
         # self.output_scale = torch.nn.Parameter(torch.full([self.widths[-1]], init_scale / scale_factor, dtype=dtype, device=device))
         for i in range(self.depth):
-            layer = torch.nn.Linear(widths[i], widths[i + 1])
-            layer.weight.data = torch.randn([widths[i + 1], widths[i]]) / math.sqrt(widths[i] / 2)
+            # layer = torch.nn.Linear(widths[i], widths[i + 1])
+            # layer.weight.data = torch.randn([widths[i + 1], widths[i]]) / math.sqrt(widths[i] / 2)
             # self.lin_layers.append(layer)
             self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
                                             init_bias=init_bias,
                                             init_scale=init_scale,
                                             pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
+                                            noise_sigma=noise_sigma if i != 0 else 0, # if i != self.depth - 1 else 0,
+                                            noise_eps=noise_eps,
                                             dtype=dtype, device=device))
             # bn = torch.nn.BatchNorm1d(widths[i + 1], momentum=1.0)
             # bn.bias.data[:] = init_bias
@@ -256,6 +280,8 @@ networks = [Network(widths=[10] + [32, 32, 32] + [10],
                     pen_lin_exp=5.0,
                     init_bias=0.0,
                     init_scale=1.0,
+                    noise_sigma=0.001,  #0.0001,
+                    noise_eps=1e-3,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
@@ -268,67 +294,10 @@ for net in networks:
     net.lin_layers[-1].bias.data[:] = Y_log_p
 
 
-class SAMOptimizer:
-    def __init__(self, base_optimizer: torch.optim.Optimizer, rho: float):
-        self.base_optimizer = base_optimizer
-        self.rho = rho
-
-    def step(self, closure):
-        # # Compute the gradient for the current parameters
-        # closure()
-        #
-        # Save the current parameters, and move in a random direction to get slightly perturbed parameters
-        saved_params = []
-        for group in self.base_optimizer.param_groups:
-            for param in group['params']:
-                saved_params.append(param.data.clone())
-                param.data += self.rho * torch.randn_like(param.data)
-
-        # Compute the gradient at the perturbed point
-        closure()
-
-        # Restore the old parameters
-        i = 0
-        for group in self.base_optimizer.param_groups:
-            for param in group['params']:
-                param.data = saved_params[i]
-                i += 1
-
-        # Take a step using gradient at the perturbed point
-        self.base_optimizer.step()
-
-
-class NoisyConnectOptimizer:
-    def __init__(self, base_optimizer: torch.optim.Optimizer, sigma: float):
-        self.base_optimizer = base_optimizer
-        self.sigma = sigma
-
-    def step(self, closure):
-        # Save the current parameters, and multiply by a random number close to 1 to get perturbed parameters
-        saved_params = []
-        for group in self.base_optimizer.param_groups:
-            for param in group['params']:
-                saved_params.append(param.data.clone())
-                param.data *= 1 + self.sigma * torch.randn_like(param.data)
-
-        # Compute the gradient at the perturbed point
-        closure()
-
-        # Restore the old parameters
-        i = 0
-        for group in self.base_optimizer.param_groups:
-            for param in group['params']:
-                param.data = saved_params[i]
-                i += 1
-
-        # Take a step using gradient at the perturbed point
-        self.base_optimizer.step()
-
-
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
-lr0 = 0.005
-lr1 = 0.005
+lr0 = 0.001
+lr1 = 0.001
 pen_act0 = 0.0
 pen_act1 = 0.0
 target_act0 = 0.1
@@ -336,14 +305,14 @@ target_act1 = 0.0
 pen_lin_coef0 = 0.0
 pen_lin_coef1 = 0.0
 # grad_max = 1e-6
-optimizers = [
-    NoisyConnectOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), sigma=0.02)
-    for i in range(ensemble_size)]
+# optimizers = [
+#     torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
+#     for i in range(ensemble_size)]
 # optimizers = [
 #     SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.05)
 #     for i in range(ensemble_size)]
-# optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.99, 0.99), eps=1e-15)
-#               for i in range(ensemble_size)]
+optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
+              for i in range(ensemble_size)]
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
 #               for i in range(ensemble_size)]
 # optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.95)
@@ -375,6 +344,7 @@ for _ in range(1, 50001):
             layer.target_act = frac * target_act1 + (1 - frac) * target_act0
         for layer in net.lin_layers:
             layer.pen_coef = frac * pen_lin_coef1 + (1 - frac) * pen_lin_coef0
+            layer.noise_sigma = 0.0001
 
     total_loss = 0.0
     total_obj = 0.0
@@ -392,14 +362,15 @@ for _ in range(1, 50001):
             train_loss = compute_loss(P, train_Y)
             obj = train_loss + net.penalty()
             obj.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
             if step_loss is None:
                 step_loss = train_loss
                 step_obj = obj
 
 
-        # torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
 
-        # optimizers[j].param_groups[0]['lr'] = lr0 * (1 - frac) + lr1 * frac
+        optimizers[j].param_groups[0]['lr'] = lr0 * (1 - frac) + lr1 * frac
+        # optimizers[j].param_groups[0]['betas'] = (0.99, 0.99)
         optimizers[j].step(closure)
         total_loss += step_loss
         total_obj += step_obj
@@ -484,7 +455,7 @@ for _ in range(1, 50001):
             wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
 
             # scale = torch.mean(torch.abs(networks[0].output_scale) * networks[0].scale_factor)
-            lr = optimizers[0].base_optimizer.param_groups[0]['lr']
+            lr = optimizers[0].param_groups[0]['lr']
             # lr = optimizers[0].param_groups[0]['lr']
             logging.info(
                 "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, anz={}, wt={}, act={}, grad={}".format(
