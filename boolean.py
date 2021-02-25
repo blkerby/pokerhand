@@ -2,6 +2,8 @@ import torch
 import logging
 from tame_pytorch import ManifoldModule, Network
 from grouped_adam import GroupedAdam
+import math
+
 
 def all_boolean_vectors(n, dtype=torch.float32):
     if n == 0:
@@ -9,37 +11,81 @@ def all_boolean_vectors(n, dtype=torch.float32):
     else:
         A = all_boolean_vectors(n - 1, dtype=dtype)
         return torch.cat([
-            torch.cat([torch.full([A.shape[0], 1], 1, dtype=dtype), A], dim=1),
-            torch.cat([torch.full([A.shape[0], 1], 0, dtype=dtype), A], dim=1),
+            torch.cat([A, torch.full([A.shape[0], 1], 0, dtype=dtype)], dim=1),
+            torch.cat([A, torch.full([A.shape[0], 1], 1, dtype=dtype)], dim=1),
         ])
 
 
 def compute_loss(P, Y):
-    return torch.sum((P[:, 0] - Y) ** 2)
+    return torch.sum((P - Y) ** 2)
 
 
 def xor_train_set(num_inputs):
     X = all_boolean_vectors(num_inputs, dtype=torch.int)
-    Y = (torch.sum(X, dim=1) % 2).to(torch.float32)
+    Y = (torch.sum(X, dim=1) % 2).to(torch.float32).view(-1, 1)
     return (X * 2 - 1).to(torch.float32), Y * 2 - 1
+
+
+def sum_eq_train_set(num_inputs, k):
+    X = all_boolean_vectors(num_inputs, dtype=torch.int)
+    Y1 = torch.sum(X[:, :k], dim=1)
+    Y2 = torch.sum(X[:, k:], dim=1)
+    Y = (Y1 == Y2).to(torch.float32).view(-1, 1)
+    return (X * 2 - 1).to(torch.float32), Y * 2 - 1
+
+
+def is_prime(n):
+    for k in range(2, int(math.sqrt(n)) + 1):
+        if n % k == 0:
+            return False
+    return True
+
+
+def prime_train_set(num_inputs):
+    X = all_boolean_vectors(num_inputs, dtype=torch.int)
+    Y = torch.tensor([[1.0] if is_prime(n) else [0.0] for n in range(X.shape[0])])
+    return (X * 2 - 1).to(torch.float32), Y * 2 - 1
+
+
+def from_bits(X):
+    return torch.sum(X * 2 ** torch.arange(X.shape[0]))
+
+def to_bits(n, num_bits):
+    return [(n // 2 ** i) % 2 for i in range(num_bits)]
+
+def adder_train_set(num_inputs):
+    assert num_inputs % 2 == 0
+    n = num_inputs // 2
+    X = all_boolean_vectors(num_inputs, dtype=torch.int)
+    out = []
+    for i in range(X.shape[0]):
+        inp1 = from_bits(X[i, :n])
+        inp2 = from_bits(X[i, n:])
+        out.append(to_bits(inp1 + inp2, n))
+    Y = torch.tensor(out)
+    return (X * 2 - 1).to(torch.float32), Y * 2 - 1
+
 
 def rand_train_set(num_inputs):
     X = all_boolean_vectors(num_inputs, dtype=torch.float32)
-    Y = torch.randint(0, 2, [X.shape[0]])
+    Y = torch.randint(0, 2, [X.shape[0], 1])
     return X * 2 - 1, (Y * 2 - 1).to(torch.float32)
 
 
-num_inputs = 10
-all_X, all_Y = xor_train_set(num_inputs)
+num_inputs = 12
+all_X, all_Y = adder_train_set(num_inputs)
+# all_X, all_Y = prime_train_set(num_inputs)
+# all_X, all_Y = sum_eq_train_set(num_inputs, 5)
+# all_X, all_Y = xor_train_set(num_inputs)
 # train_X, train_Y = rand_train_set(num_inputs)
 
 torch.random.manual_seed(0)
-train_mask = torch.rand([all_X.shape[0]]) < 0.8
+train_mask = torch.rand([all_X.shape[0]]) < 0.25
 torch.random.seed()
 train_X = all_X[train_mask, :]
-train_Y = all_Y[train_mask]
+train_Y = all_Y[train_mask, :]
 test_X = all_X[~train_mask, :]
-test_Y = all_Y[~train_mask]
+test_Y = all_Y[~train_mask, :]
 
 # train_X = all_X  # No separate test set here since we're not trying to generalize
 # train_Y = all_Y
@@ -48,30 +94,27 @@ test_Y = all_Y[~train_mask]
 # # print(train_Y)
 
 ensemble_size = 1
-networks = [Network(widths=[num_inputs] + [128, 64, 32, 16] + [1],
-                    pen_lin_coef=0.0,  # 0.001,
+networks = [Network(widths=[num_inputs] + [128, 64, 32] + [train_Y.shape[1]],
+                    pen_lin_coef=0.0,
                     pen_lin_exp=2.0,
                     pen_scale=0.0,
                     arity=2,
                     scale_init=1.0,
-                    scale_factor=1.0,
-                    skip_connections=True,
+                    scale_factor=0.3,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
 
 
-lr0 = 0.015
+lr0 = 0.1
 lr1 = lr0
 pen_act0 = 0.0
 pen_act1 = 0.0
-target_act0 = 0.3
-target_act1 = 0.1
 pen_lin_coef0 = 0.0
 pen_lin_coef1 = 0.0
 pen_scale_coef0 = 0.0
 pen_scale_coef1 = 0.0
-# optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
+# optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.99, 0.99), eps=1e-15)
 #               for i in range(ensemble_size)]
 optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.998, 0.998), eps=1e-15)
               for i in range(ensemble_size)]
@@ -93,9 +136,6 @@ with torch.no_grad():
 for _ in range(1, 10001):
     frac = min(epoch / 2000, 1.0)
     for net in networks:
-        # for layer in net.act_layers:
-        #     layer.pen_act = frac * pen_act1 + (1 - frac) * pen_act0
-        #     layer.target_act = frac * target_act1 + (1 - frac) * target_act0
         for layer in net.lin_layers:
             layer.pen_coef = frac * pen_lin_coef1 + (1 - frac) * pen_lin_coef0
             layer.pen_scale_coef = frac * pen_scale_coef1 + (1 - frac) * pen_scale_coef0
@@ -118,7 +158,7 @@ for _ in range(1, 10001):
             obj.backward()
 
 
-            # torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
+            torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
             if step_loss is None:
                 step_loss = train_loss
                 step_obj = obj
@@ -149,7 +189,7 @@ for _ in range(1, 10001):
                 net.eval()
             test_P = sum(net(test_X) for net in networks) / ensemble_size
             test_loss = compute_loss(test_P, test_Y)
-            test_acc = torch.mean((torch.sgn(test_P[:, 0]) == torch.sgn(test_Y)).to(torch.float32))
+            test_acc = torch.mean(torch.all(torch.sgn(test_P) == torch.sgn(test_Y), dim=1).to(torch.float32))
 
             for j, net in enumerate(networks):
                 for i, p in enumerate(net.parameters()):
@@ -175,11 +215,11 @@ for _ in range(1, 10001):
             lr = optimizers[0].param_groups[0]['lr']
             # lr = optimizers[0].param_groups[0]['lr']
             logging.info(
-                "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, wt={}, scale={}".format(
+                "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, wt={}, scale={:.3f}".format(
                     epoch,
                     lr, total_loss / ensemble_size / train_X.shape[0],
                         total_obj / ensemble_size / train_X.shape[0],
                     float(test_loss / test_X.shape[0]),
                     float(test_acc),
-                    wt_fracs_fmt, (networks[0].scale * networks[0].scale_factor).tolist()))
+                    wt_fracs_fmt, torch.max(networks[0].scale * networks[0].scale_factor).item()))
     epoch += 1
