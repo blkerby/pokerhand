@@ -9,6 +9,7 @@ import logging
 import sparselin_pytorch
 import math
 from grouped_adam import GroupedAdam
+from high_order_act_pytorch import HighOrderActivation, HighOrderActivationB
 
 logging.basicConfig(format='%(asctime)s %(message)s',
                     level=logging.INFO,
@@ -77,51 +78,34 @@ class L1Linear(torch.nn.Module):
     def __init__(self, input_width, output_width,
                  init_scale: float,
                  init_bias: float,
-                 noise_sigma: float,
-                 noise_eps: float,
                  pen_coef=0.0, pen_exp=2.0,
+                 pen_scale_coef=0.0,
                  dtype=torch.float32, device=None,
                  num_iters=6):
         super().__init__()
         self.input_width = input_width
         self.output_width = output_width
-        self.noise_sigma = noise_sigma
-        self.noise_eps = noise_eps
         self.pen_coef = pen_coef
         self.pen_exp = pen_exp
+        self.pen_scale_coef = pen_scale_coef
         self.weights_pos_neg = Simplex([input_width * 2, output_width], dim=0, dtype=dtype, device=device,
                                        num_iters=num_iters)
         # self.weights = L1Ball([input_width, output_width], dim=0, dtype=dtype, device=device, num_iters=num_iters)
-        self.scale = torch.nn.Parameter(torch.full([output_width], init_scale, dtype=dtype, device=device))
+        # self.scale = torch.nn.Parameter(torch.full([output_width], init_scale, dtype=dtype, device=device))
+        self.scale = torch.nn.Parameter(torch.full([], init_scale, dtype=dtype, device=device))
         self.bias = torch.nn.Parameter(torch.full([output_width], init_bias, dtype=dtype, device=device))
 
     def forward(self, X):
         assert X.shape[1] == self.input_width
         self.cnt_rows = X.shape[0]
         weights = self.weights_pos_neg.param[:self.input_width, :] - self.weights_pos_neg.param[self.input_width:, :]
-        Xw = torch.matmul(X, weights)
-        if self.noise_sigma == 0.0 or not self.training:
-            # print("skipping")
-            Y = Xw
-        else:
-            # weights = raw_weights * (1 + torch.randn_like(raw_weights) * self.noise_sigma)  # Only correct if batch size is 1
-
-            # var = torch.matmul(X ** 2, weights ** 2)
-            # Y = Xw + self.noise_sigma * torch.sqrt(var + self.noise_eps) * torch.randn_like(Xw)
-
-            # std = torch.matmul(torch.abs(X), torch.abs(weights))
-            # Y = Xw + self.noise_sigma * std * torch.randn_like(Xw)
-
-            # Y = Xw * (1 + self.noise_sigma * torch.randn_like(Xw))
-            act = torch.sum(torch.abs(X), dim=1)
-            Y = Xw + self.noise_sigma * act.unsqueeze(1) * torch.randn_like(Xw)
-            # Y = Xw
-        return Y * self.scale.view(1, -1) + self.bias.view(1, -1)
+        return torch.matmul(X, weights) * self.scale.view(1, -1) + self.bias.view(1, -1)
 
     def penalty(self):
-        p = self.weights_pos_neg.param
-        # p = torch.abs(self.weights.param)
-        return self.pen_coef * self.cnt_rows * torch.mean(1 - (1 - p) ** self.pen_exp - p)
+        w = self.weights_pos_neg.param
+        pen_weight = self.pen_coef * self.cnt_rows * torch.mean(1 - (1 - w) ** self.pen_exp - w)
+        pen_scale = self.pen_scale_coef * self.cnt_rows * torch.mean(torch.abs(self.scale))
+        return pen_weight + pen_scale
 
 
 #
@@ -180,7 +164,7 @@ class ReLU(torch.nn.Module):
             self.X.retain_grad()
         out = torch.clamp(X, min=0.0)
         self.cnt_rows = X.shape[0]
-        self.cnt_act = torch.sum(X >= 0.0, dim=0)
+        # self.cnt_act = torch.sum(X >= 0.0, dim=0)
         return out
 
     def penalty(self):
@@ -194,14 +178,13 @@ class ReLU(torch.nn.Module):
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
-                 noise_sigma: float,
-                 noise_eps: float,
                  init_bias: float = 0.0,
                  init_scale: float = 1.0,
                  pen_act: float = 0.0,
                  target_act: float = 0.5,
                  pen_lin_coef: float = 0.0,
                  pen_lin_exp: float = 2.0,
+                 pen_scale_coef: float = 0.0,
                  dtype=torch.float32,
                  device=None):
         super().__init__()
@@ -220,17 +203,17 @@ class Network(torch.nn.Module):
                                             init_bias=init_bias,
                                             init_scale=init_scale,
                                             pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
-                                            noise_sigma=noise_sigma if i != 0 else 0, # if i != self.depth - 1 else 0,
-                                            noise_eps=noise_eps,
+                                            pen_scale_coef=pen_scale_coef,
                                             dtype=dtype, device=device))
             # bn = torch.nn.BatchNorm1d(widths[i + 1], momentum=1.0)
             # bn.bias.data[:] = init_bias
             # self.bn_layers.append(bn)
             if i != self.depth - 1:
-                self.act_layers.append(ReLU(widths[i + 1],
-                                            pen_act=pen_act,
-                                            target_act=target_act,
-                                            dtype=dtype, device=device))
+                # self.act_layers.append(ReLU(widths[i + 1],
+                #                             pen_act=pen_act,
+                #                             target_act=target_act,
+                #                             dtype=dtype, device=device))
+                self.act_layers.append(HighOrderActivation(2, widths[i + 1] // 2, 2))
 
     def forward(self, X):
         for i in range(self.depth):
@@ -242,10 +225,9 @@ class Network(torch.nn.Module):
         return X
 
     def penalty(self):
-        return sum(layer.penalty() for layer in self.act_layers)
-
-
-#               sum(layer.penalty() for layer in self.lin_layers)
+        return sum(layer.penalty() for layer in self.lin_layers)
+        # return sum(layer.penalty() for layer in self.act_layers) + \
+        #       sum(layer.penalty() for layer in self.lin_layers)
 
 
 def compute_loss(P, Y):
@@ -278,10 +260,9 @@ networks = [Network(widths=[10] + [32, 32, 32] + [10],
                     target_act=0.03,
                     pen_lin_coef=0.0,  # 0.001,
                     pen_lin_exp=5.0,
+                    pen_scale_coef=0.0,
                     init_bias=0.0,
-                    init_scale=1.0,
-                    noise_sigma=0.001,  #0.0001,
-                    noise_eps=1e-3,
+                    init_scale=2.0,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
@@ -296,25 +277,27 @@ for net in networks:
 
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
-lr0 = 0.001
-lr1 = 0.001
+lr0 = 0.01
+lr1 = lr0
 pen_act0 = 0.0
-pen_act1 = 0.0
-target_act0 = 0.1
-target_act1 = 0.0
+pen_act1 = 1e-3
+target_act0 = 0.3
+target_act1 = 0.1
 pen_lin_coef0 = 0.0
-pen_lin_coef1 = 0.0
+pen_lin_coef1 = 0.001
+pen_scale_coef0 = 5e-5
+pen_scale_coef1 = 5e-5
 # grad_max = 1e-6
 # optimizers = [
 #     torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
 #     for i in range(ensemble_size)]
 # optimizers = [
 #     SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.05)
-#     for i in range(ensemble_size)]
-optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
-              for i in range(ensemble_size)]
-# optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
+#     for i in range(ensemble_size)]9
+# optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
 #               for i in range(ensemble_size)]
+optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
+              for i in range(ensemble_size)]
 # optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.95)
 #               for i in range(ensemble_size)]
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.003, betas=(0.5, 0.5))
@@ -329,8 +312,6 @@ average_param_beta = 0.98
 average_param_weight = 0.0
 epoch = 1
 
-l1_pen_coef = 0.05
-
 with torch.no_grad():
     for net in networks:
         for mod in net.modules():
@@ -344,7 +325,7 @@ for _ in range(1, 50001):
             layer.target_act = frac * target_act1 + (1 - frac) * target_act0
         for layer in net.lin_layers:
             layer.pen_coef = frac * pen_lin_coef1 + (1 - frac) * pen_lin_coef0
-            layer.noise_sigma = 0.0001
+            layer.pen_scale_coef = frac * pen_scale_coef1 + (1 - frac) * pen_scale_coef0
 
     total_loss = 0.0
     total_obj = 0.0
@@ -362,6 +343,8 @@ for _ in range(1, 50001):
             train_loss = compute_loss(P, train_Y)
             obj = train_loss + net.penalty()
             obj.backward()
+
+
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
             if step_loss is None:
                 step_loss = train_loss
@@ -394,21 +377,6 @@ for _ in range(1, 50001):
         average_param_weight = average_param_beta * average_param_weight + (1 - average_param_beta)
 
     if epoch % 100 == 0:
-        act_fracs = []
-        for layer in networks[0].act_layers:
-            act_fracs.append(torch.mean(layer.cnt_act.to(torch.float32)) / layer.cnt_rows)
-        act_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_fracs))
-
-        act_avgs = []
-        for layer in networks[0].act_layers:
-            act_avgs.append(torch.mean(layer.X ** 2))
-        act_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_avgs))
-
-        grad_avgs = []
-        for layer in networks[0].act_layers:
-            grad_avgs.append(torch.mean(layer.X.grad ** 2))
-        grad_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in grad_avgs))
-
         with torch.no_grad():
             saved_params = [[p.data.clone() for p in net.parameters()] for net in networks]
             # saved_batch_norm_running_mean = [[b._buffers['running_mean'].clone() for b in net.bn_layers] for net
@@ -447,23 +415,38 @@ for _ in range(1, 50001):
             #     weights = layer.weights_pos_neg.param[:layer.input_width, :] - \
             #               layer.weights_pos_neg.param[layer.input_width:, :]
             #     wt_fracs.append(torch.mean((weights != 0).to(torch.float32)))
+
+            # act_fracs = []
+            # for layer in networks[0].act_layers:
+            #     act_fracs.append(torch.mean((layer.X >= 0).to(torch.float32)))
+            # act_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_fracs))
+
+            # act_avgs = []
+            # for layer in networks[0].act_layers:
+            #     act_avgs.append(torch.mean(torch.clamp(layer.X, min=0.0)))
+            # act_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_avgs))
+
             wt_fracs = []
             for layer in networks[0].lin_layers:
-                wt_fracs.append(torch.mean((layer.weights_pos_neg.param > 0).to(torch.float32)))
+                wt_fracs.append(torch.mean((layer.weights_pos_neg.param > 1e-8).to(torch.float32)))
                 # weights = layer.weight
                 # wt_fracs.append(torch.mean((weights != 0).to(torch.float32)))
             wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
 
-            # scale = torch.mean(torch.abs(networks[0].output_scale) * networks[0].scale_factor)
+            scales = []
+            for layer in networks[0].lin_layers:
+                scales.append(torch.mean(torch.abs(layer.scale)))
+            scales_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in scales))
+
             lr = optimizers[0].param_groups[0]['lr']
             # lr = optimizers[0].param_groups[0]['lr']
             logging.info(
-                "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, anz={}, wt={}, act={}, grad={}".format(
+                "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, wt={}, scale={}".format(
                     epoch,
                     lr, total_loss / ensemble_size / train_X.shape[0],
                         total_obj / ensemble_size / train_X.shape[0],
                     float(test_loss / test_X.shape[0]), float(test_acc),
-                    act_fracs_fmt, wt_fracs_fmt, act_avgs_fmt, grad_avgs_fmt))
+                    wt_fracs_fmt, scales_fmt))
     epoch += 1
 
 torch.set_printoptions(linewidth=120)
@@ -472,14 +455,11 @@ print(sklearn.metrics.confusion_matrix(test_Y, torch.argmax(test_P, dim=1)))
 for net in networks:
     net.eval()
 Y1L = networks[0].lin_layers[0](train_X)
-Y1B = networks[0].bn_layers[0](Y1L)
-Y1A = networks[0].act_layers[0](Y1B)
+Y1A = networks[0].act_layers[0](Y1L)
 Y2L = networks[0].lin_layers[1](Y1A)
-Y2B = networks[0].bn_layers[1](Y2L)
-Y2A = networks[0].act_layers[1](Y2B)
+Y2A = networks[0].act_layers[1](Y2L)
 Y3L = networks[0].lin_layers[2](Y2A)
-Y3B = networks[0].bn_layers[2](Y3L)
-Y3A = networks[0].act_layers[2](Y3B)
+Y3A = networks[0].act_layers[2](Y3L)
 
 print(torch.sum(Y1A != 0, dim=0))
 print(torch.sum(Y2A != 0, dim=0))

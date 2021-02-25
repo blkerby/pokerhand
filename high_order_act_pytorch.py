@@ -82,10 +82,10 @@ class HighOrderActivation(torch.nn.Module):
 
     def forward(self, X):
         assert len(X.shape) == 2
-        assert X.shape[0] == self.input_groups * self.arity
-        X1 = torch.transpose(X, 0, 1).view(X.shape[1], self.input_groups, self.arity)
+        assert X.shape[1] == self.input_groups * self.arity
+        X1 = X.view(X.shape[0], self.input_groups, self.arity)
         out1 = high_order_act(X1, self.params)
-        return torch.transpose(out1.view(X.shape[1], self.input_groups * self.out_dim), 0, 1)
+        return out1.view(X.shape[0], self.input_groups * self.out_dim)
 
 
 class HighOrderActivationB(torch.nn.Module):
@@ -98,10 +98,10 @@ class HighOrderActivationB(torch.nn.Module):
 
     def forward(self, X):
         assert len(X.shape) == 2
-        assert X.shape[0] == self.input_groups * self.arity
-        X1 = torch.transpose(X, 0, 1).view(X.shape[1], self.input_groups, self.arity)
+        assert X.shape[1] == self.input_groups * self.arity
+        X1 = X.view(X.shape[0], self.input_groups, self.arity)
         out1 = high_order_act_b(X1, self.params)
-        return torch.transpose(out1.view(X.shape[1], self.input_groups * self.out_dim), 0, 1)
+        return out1.view(X.shape[0], self.input_groups * self.out_dim)
 
 
 # m = 4
