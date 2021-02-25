@@ -1,6 +1,6 @@
 import torch
 import logging
-from tame_pytorch import ManifoldModule, Network
+from tame_pytorch import ManifoldModule, Network, L1Linear
 from grouped_adam import GroupedAdam
 import math
 
@@ -32,20 +32,6 @@ def sum_eq_train_set(num_inputs, k):
     Y2 = torch.sum(X[:, k:], dim=1)
     Y = (Y1 == Y2).to(torch.float32).view(-1, 1)
     return (X * 2 - 1).to(torch.float32), Y * 2 - 1
-
-
-def is_prime(n):
-    for k in range(2, int(math.sqrt(n)) + 1):
-        if n % k == 0:
-            return False
-    return True
-
-
-def prime_train_set(num_inputs):
-    X = all_boolean_vectors(num_inputs, dtype=torch.int)
-    Y = torch.tensor([[1.0] if is_prime(n) else [0.0] for n in range(X.shape[0])])
-    return (X * 2 - 1).to(torch.float32), Y * 2 - 1
-
 
 def from_bits(X):
     return torch.sum(X * 2 ** torch.arange(X.shape[0]))
@@ -106,8 +92,12 @@ networks = [Network(widths=[num_inputs] + [128, 64, 32] + [train_Y.shape[1]],
             for _ in range(ensemble_size)]
 
 
-lr0 = 0.1
-lr1 = lr0
+reaper_factor0 = 0.0
+repear_factor1 = 0.05
+lr0 = 0.12
+lr1 = 0.06
+beta0 = 0.998
+beta1 = 0.999
 pen_act0 = 0.0
 pen_act1 = 0.0
 pen_lin_coef0 = 0.0
@@ -116,7 +106,7 @@ pen_scale_coef0 = 0.0
 pen_scale_coef1 = 0.0
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.99, 0.99), eps=1e-15)
 #               for i in range(ensemble_size)]
-optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.998, 0.998), eps=1e-15)
+optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
               for i in range(ensemble_size)]
 # optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.9)
 #               for i in range(ensemble_size)]
@@ -134,7 +124,7 @@ with torch.no_grad():
             if isinstance(mod, ManifoldModule):
                 mod.project()
 for _ in range(1, 10001):
-    frac = min(epoch / 2000, 1.0)
+    frac = min(epoch / 3000, 1.0)
     for net in networks:
         for layer in net.lin_layers:
             layer.pen_coef = frac * pen_lin_coef1 + (1 - frac) * pen_lin_coef0
@@ -145,31 +135,29 @@ for _ in range(1, 10001):
     for j, net in enumerate(networks):
         net.train()
 
-        step_loss = None
-        step_obj = None
-        # optimizers[j].zero_grad()
-        def closure():
-            global step_loss
-            global step_obj
-            net.zero_grad()
-            P = net(train_X)
-            train_loss = compute_loss(P, train_Y)
-            obj = train_loss + net.penalty()
-            obj.backward()
+        net.zero_grad()
+        P = net(train_X)
+        train_loss = compute_loss(P, train_Y)
+        obj = train_loss + net.penalty()
+        obj.backward()
 
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
 
-            torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
-            if step_loss is None:
-                step_loss = train_loss
-                step_obj = obj
+        lr = lr0 * (1 - frac) + lr1 * frac
+        beta = beta0 * (1 - frac) + beta1 * frac
+        reaper_factor = frac * repear_factor1 + (1 - frac) * reaper_factor0
+        with torch.no_grad():
+            for mod in net.modules():
+                if isinstance(mod, L1Linear):
+                    # noise = torch.rand_like(mod.weights_pos_neg.param)
+                    # mod.weights_pos_neg.param *= (1 + noise_factor * noise)
+                    mod.weights_pos_neg.param *= (1 + reaper_factor * lr)
 
-
-
-        optimizers[j].param_groups[0]['lr'] = lr0 * (1 - frac) + lr1 * frac
-        # optimizers[j].param_groups[0]['betas'] = (0.99, 0.99)
-        optimizers[j].step(closure)
-        total_loss += step_loss
-        total_obj += step_obj
+        optimizers[j].param_groups[0]['lr'] = lr
+        optimizers[j].param_groups[0]['betas'] = (beta, beta)
+        optimizers[j].step()
+        total_loss += train_loss
+        total_obj += obj
         with torch.no_grad():
             for mod in net.modules():
                 if isinstance(mod, ManifoldModule):
@@ -207,7 +195,7 @@ for _ in range(1, 10001):
 
             wt_fracs = []
             for layer in networks[0].lin_layers:
-                wt_fracs.append(torch.mean((layer.weights_pos_neg.param > 1e-8).to(torch.float32)))
+                wt_fracs.append(torch.sum(layer.weights_pos_neg.param > 1e-8).to(torch.float32) / layer.weights_pos_neg.param.shape[1])
                 # weights = layer.weight
                 # wt_fracs.append(torch.mean((weights != 0).to(torch.float32)))
             wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
@@ -221,5 +209,5 @@ for _ in range(1, 10001):
                         total_obj / ensemble_size / train_X.shape[0],
                     float(test_loss / test_X.shape[0]),
                     float(test_acc),
-                    wt_fracs_fmt, torch.max(networks[0].scale * networks[0].scale_factor).item()))
+                    wt_fracs_fmt, torch.max(torch.abs(networks[0].scale) * networks[0].scale_factor).item()))
     epoch += 1

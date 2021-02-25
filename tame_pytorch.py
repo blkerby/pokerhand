@@ -165,7 +165,8 @@ class Network(torch.nn.Module):
         self.scale_factor = scale_factor
         self.lin_layers = torch.nn.ModuleList([])
         self.act_layers = torch.nn.ModuleList([])
-        self.scale = torch.nn.Parameter(torch.full([widths[-1]], scale_init / scale_factor, dtype=dtype, device=device))
+        # self.scale = torch.nn.Parameter(torch.full([widths[-1]], scale_init / scale_factor, dtype=dtype, device=device))
+        self.scale = torch.nn.Parameter(torch.full([], scale_init / scale_factor, dtype=dtype, device=device))
         for i in range(self.depth):
             if i != self.depth - 1:
                 # self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
@@ -188,10 +189,12 @@ class Network(torch.nn.Module):
             X = self.lin_layers[i](X)
             if i != self.depth - 1:
                 X = self.act_layers[i](X)
-        X = X * (self.scale.view(1, -1) * self.scale_factor)
+        X = X * (self.scale * self.scale_factor)
         return X
 
     def penalty(self):
         return sum(layer.penalty() for layer in self.lin_layers) + \
-            self.pen_scale * torch.sum(torch.abs(self.scale)) * self.scale_factor
+            self.pen_scale * (self.scale * self.scale_factor) ** 2
+        # return sum(layer.penalty() for layer in self.lin_layers) + \
+        #     self.pen_scale * torch.sum((self.scale * self.scale_factor) ** 2)
 
