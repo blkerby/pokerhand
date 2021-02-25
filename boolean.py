@@ -29,12 +29,13 @@ def rand_train_set(num_inputs):
     return X * 2 - 1, (Y * 2 - 1).to(torch.float32)
 
 
-num_inputs = 8
+num_inputs = 10
 all_X, all_Y = xor_train_set(num_inputs)
 # train_X, train_Y = rand_train_set(num_inputs)
 
 torch.random.manual_seed(0)
 train_mask = torch.rand([all_X.shape[0]]) < 0.8
+torch.random.seed()
 train_X = all_X[train_mask, :]
 train_Y = all_Y[train_mask]
 test_X = all_X[~train_mask, :]
@@ -47,20 +48,21 @@ test_Y = all_Y[~train_mask]
 # # print(train_Y)
 
 ensemble_size = 1
-networks = [Network(widths=[num_inputs] + [128, 64, 32] + [1],
+networks = [Network(widths=[num_inputs] + [128, 64, 32, 16] + [1],
                     pen_lin_coef=0.0,  # 0.001,
-                    pen_lin_exp=5.0,
-                    pen_scale=1.0,
+                    pen_lin_exp=2.0,
+                    pen_scale=0.0,
                     arity=2,
                     scale_init=1.0,
                     scale_factor=1.0,
+                    skip_connections=True,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
 
 
-lr0 = 1.0 / train_X.shape[0]
-lr1 = 1.0 / train_X.shape[0]
+lr0 = 0.015
+lr1 = lr0
 pen_act0 = 0.0
 pen_act1 = 0.0
 target_act0 = 0.3
@@ -71,7 +73,7 @@ pen_scale_coef0 = 0.0
 pen_scale_coef1 = 0.0
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
 #               for i in range(ensemble_size)]
-optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.995, 0.995), eps=1e-15)
+optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.998, 0.998), eps=1e-15)
               for i in range(ensemble_size)]
 # optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.9)
 #               for i in range(ensemble_size)]

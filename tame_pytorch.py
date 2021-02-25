@@ -156,6 +156,7 @@ class Network(torch.nn.Module):
                  scale_init: float = 0.0,
                  scale_factor: float = 1.0,
                  arity: int = 2,
+                 skip_connections: bool = False,
                  dtype=torch.float32,
                  device=None):
         super().__init__()
@@ -163,31 +164,40 @@ class Network(torch.nn.Module):
         self.depth = len(widths) - 1
         self.pen_scale = pen_scale
         self.scale_factor = scale_factor
+        self.skip_connections = skip_connections
         self.lin_layers = torch.nn.ModuleList([])
         self.act_layers = torch.nn.ModuleList([])
         self.scale = torch.nn.Parameter(torch.full([widths[-1]], scale_init / scale_factor, dtype=dtype, device=device))
+        cumulative_width = 0
         for i in range(self.depth):
+            if skip_connections:
+                cumulative_width += widths[i]
+            else:
+                cumulative_width = widths[i]
             if i != self.depth - 1:
                 # self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
                 #                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
                 #                                 dtype=dtype, device=device))
                 # self.act_layers.append(torch.nn.ReLU())
 
-                self.lin_layers.append(L1Linear(widths[i], widths[i + 1] * arity,
+                self.lin_layers.append(L1Linear(cumulative_width, widths[i + 1] * arity,
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
                                                 dtype=dtype, device=device))
                 self.act_layers.append(D2Activation(widths[i + 1]))
                 # self.act_layers.append(MinOut(arity))
             else:
-                self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
+                self.lin_layers.append(L1Linear(cumulative_width, widths[i + 1],
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
                                                 dtype=dtype, device=device))
 
     def forward(self, X):
         for i in range(self.depth):
+            X0 = X
             X = self.lin_layers[i](X)
             if i != self.depth - 1:
                 X = self.act_layers[i](X)
+                if self.skip_connections:
+                    X = torch.cat([X, X0], dim=1)
         X = X * (self.scale.view(1, -1) * self.scale_factor)
         return X
 
