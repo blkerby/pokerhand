@@ -59,14 +59,14 @@ def rand_train_set(num_inputs):
 
 
 num_inputs = 12
-all_X, all_Y = adder_train_set(num_inputs)
+# all_X, all_Y = adder_train_set(num_inputs)
 # all_X, all_Y = prime_train_set(num_inputs)
 # all_X, all_Y = sum_eq_train_set(num_inputs, 5)
-# all_X, all_Y = xor_train_set(num_inputs)
+all_X, all_Y = xor_train_set(num_inputs)
 # train_X, train_Y = rand_train_set(num_inputs)
 
 torch.random.manual_seed(0)
-train_mask = torch.rand([all_X.shape[0]]) < 0.25
+train_mask = torch.rand([all_X.shape[0]]) < 0.5
 torch.random.seed()
 train_X = all_X[train_mask, :]
 train_Y = all_Y[train_mask, :]
@@ -80,34 +80,35 @@ test_Y = all_Y[~train_mask, :]
 # # print(train_Y)
 
 ensemble_size = 1
-networks = [Network(widths=[num_inputs] + [128, 64, 32] + [train_Y.shape[1]],
+networks = [Network(widths=[num_inputs] + [64, 32, 16] + [train_Y.shape[1]],
                     pen_lin_coef=0.0,
                     pen_lin_exp=2.0,
-                    pen_scale=0.0,
-                    arity=2,
+                    pen_scale=0.01,
+                    arity=8,
                     scale_init=1.0,
-                    scale_factor=0.3,
+                    scale_factor=1e-5,
+                    bias_factor=0.0,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
 
 
 reaper_factor0 = 0.0
-repear_factor1 = 0.05
-lr0 = 0.12
-lr1 = 0.06
+reaper_factor1 = 0.05
+lr0 = 0.1
+lr1 = 0.1
 beta0 = 0.998
-beta1 = 0.999
+beta1 = 0.998
 pen_act0 = 0.0
 pen_act1 = 0.0
 pen_lin_coef0 = 0.0
 pen_lin_coef1 = 0.0
-pen_scale_coef0 = 0.0
-pen_scale_coef1 = 0.0
-# optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.99, 0.99), eps=1e-15)
-#               for i in range(ensemble_size)]
-optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
+pen_scale0 = 0.0  #0.03
+pen_scale1 = 0.0  #0.03
+optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
               for i in range(ensemble_size)]
+# optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
+#               for i in range(ensemble_size)]
 # optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.9)
 #               for i in range(ensemble_size)]
 
@@ -126,9 +127,9 @@ with torch.no_grad():
 for _ in range(1, 10001):
     frac = min(epoch / 3000, 1.0)
     for net in networks:
+        net.pen_scale = frac * pen_scale1 + (1 - frac) * pen_scale0
         for layer in net.lin_layers:
             layer.pen_coef = frac * pen_lin_coef1 + (1 - frac) * pen_lin_coef0
-            layer.pen_scale_coef = frac * pen_scale_coef1 + (1 - frac) * pen_scale_coef0
 
     total_loss = 0.0
     total_obj = 0.0
@@ -145,7 +146,7 @@ for _ in range(1, 10001):
 
         lr = lr0 * (1 - frac) + lr1 * frac
         beta = beta0 * (1 - frac) + beta1 * frac
-        reaper_factor = frac * repear_factor1 + (1 - frac) * reaper_factor0
+        reaper_factor = frac * reaper_factor1 + (1 - frac) * reaper_factor0
         with torch.no_grad():
             for mod in net.modules():
                 if isinstance(mod, L1Linear):

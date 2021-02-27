@@ -47,6 +47,7 @@ class Simplex(ManifoldModule):
 class L1Linear(torch.nn.Module):
     def __init__(self, input_width, output_width,
                  pen_coef=0.0, pen_exp=2.0,
+                 bias_factor=1.0,
                  dtype=torch.float32, device=None,
                  num_iters=6):
         super().__init__()
@@ -54,19 +55,20 @@ class L1Linear(torch.nn.Module):
         self.output_width = output_width
         self.pen_coef = pen_coef
         self.pen_exp = pen_exp
+        self.bias_factor = bias_factor
         self.weights_pos_neg = Simplex([input_width * 2, output_width], dim=0, dtype=dtype, device=device,
                                        num_iters=num_iters)
 
         # self.active_input = torch.randint(0, input_width * 2, [output_width])
         # self.weights_pos_neg.param.data[:, :] = 0.0
         # self.weights_pos_neg.param.data[self.active_input, torch.arange(output_width)] = 1.0
-        # self.bias = torch.nn.Parameter(torch.zeros([output_width], dtype=dtype, device=device))
+        self.bias = torch.nn.Parameter(torch.zeros([output_width], dtype=dtype, device=device))
 
     def forward(self, X):
         assert X.shape[1] == self.input_width
         self.cnt_rows = X.shape[0]
         weights = self.weights_pos_neg.param[:self.input_width, :] - self.weights_pos_neg.param[self.input_width:, :]
-        return torch.matmul(X, weights) #+ self.bias.view(1, -1)
+        return torch.matmul(X, weights) + self.bias.view(1, -1) * self.bias_factor
 
     def penalty(self):
         w = self.weights_pos_neg.param
@@ -147,6 +149,80 @@ class D2Activation(ManifoldModule):
     def penalty(self):
         return 0.0
 
+
+class MonotoneA1Activation(ManifoldModule):
+    def __init__(self, input_groups):
+        super().__init__()
+        self.input_groups = input_groups
+        self.params = torch.nn.Parameter((torch.randint(0, 2, [input_groups, 2]) * 2 - 1).to(torch.float32))
+
+    def forward(self, inp):
+        inp_view = inp.view(inp.shape[0], self.input_groups, 2)
+        X = inp_view[:, :, 0]
+        Y = inp_view[:, :, 1]
+        ZP = self.params[:, 0].view(1, -1)  # Value on (0, 1)
+        PZ = self.params[:, 1].view(1, -1)  # Value on (1, 0)
+        out = torch.where(Y <= X,
+                          PZ * X + (1 - PZ) * Y,
+                          (1 - ZP) * X + ZP * Y)
+        return out
+
+    def project(self):
+        self.params.data = torch.clamp(self.params.data, min=0.0, max=1.0)
+
+    def penalty(self):
+        return 0.0
+
+
+def high_order_act(A, params):
+    A_sort, A_ind = torch.sort(A, dim=2)
+    A_diff = A_sort[:, :, 1:] - A_sort[:, :, :-1]
+    coef = torch.cat([A_sort[:, :, 0:1], A_diff], dim=2)
+    params_A_ind = torch.flip(torch.cumsum(torch.flip(2 ** A_ind, dims=[2]), dim=2), dims=[2])
+    ind0 = torch.unsqueeze(torch.unsqueeze(torch.arange(0, params.shape[0], dtype=torch.int64), 1), 2)
+    ind1 = torch.transpose(params_A_ind, 0, 1)
+    params_gather = params[ind0, ind1, :]
+    out = torch.einsum('jikl,ijk->ijl', params_gather, coef)
+    return out
+
+
+class MonotoneActivation(ManifoldModule):
+    def __init__(self, arity, input_groups, out_dim):
+        super().__init__()
+        self.arity = arity
+        self.input_groups = input_groups
+        self.out_dim = out_dim
+        self.params = torch.nn.Parameter(torch.randint(0, 2, [input_groups, 2 ** arity, out_dim]).to(torch.float32))
+        self.project()
+        self.params.data = torch.round(self.params.data)
+
+    def forward(self, X):
+        assert len(X.shape) == 2
+        assert X.shape[1] == self.input_groups * self.arity
+        X1 = X.view(X.shape[0], self.input_groups, self.arity)
+        out1 = high_order_act(X1, self.params)
+        return out1.view(X.shape[0], self.input_groups * self.out_dim)
+
+    def project(self):
+        # Compute the greatest monotone lower bound and least monotone upper bound and average them.
+        # Theoretically it would be better to use the Euclidean projection but that would be more
+        # difficult to compute.
+        clamped = torch.clamp(self.params, min=0.0, max=1.0)
+        lower = clamped
+        upper = clamped.clone()
+        for i in range(self.arity):
+            shape0 = 2 ** i
+            shape1 = 2 ** (self.arity - i - 1)
+            lower_view = lower.view(self.input_groups, shape0, 2, shape1, self.out_dim)
+            lower_min = torch.min(lower_view[:, :, 0, :, :], lower_view[:, :, 1, :, :])
+            lower_view[:, :, 0, :, :] = lower_min
+            upper_view = upper.view(self.input_groups, shape0, 2, shape1, self.out_dim)
+            upper_max = torch.max(upper_view[:, :, 0, :, :], upper_view[:, :, 1, :, :])
+            upper_view[:, :, 1, :, :] = upper_max
+        self.params.data = (lower + upper) / 2
+        self.params.data[:, 2 ** self.arity - 1, :] = 1.0
+
+
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
@@ -155,6 +231,7 @@ class Network(torch.nn.Module):
                  pen_scale: float = 0.0,
                  scale_init: float = 0.0,
                  scale_factor: float = 1.0,
+                 bias_factor: float = 1.0,
                  arity: int = 2,
                  dtype=torch.float32,
                  device=None):
@@ -176,8 +253,11 @@ class Network(torch.nn.Module):
 
                 self.lin_layers.append(L1Linear(widths[i], widths[i + 1] * arity,
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
+                                                bias_factor=bias_factor,
                                                 dtype=dtype, device=device))
-                self.act_layers.append(D2Activation(widths[i + 1]))
+                # self.act_layers.append(D2Activation(widths[i + 1]))
+                # self.act_layers.append(MonotoneA1Activation(widths[i + 1]))
+                self.act_layers.append(MonotoneActivation(arity, widths[i + 1], 1))
                 # self.act_layers.append(MinOut(arity))
             else:
                 self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
@@ -185,11 +265,13 @@ class Network(torch.nn.Module):
                                                 dtype=dtype, device=device))
 
     def forward(self, X):
+        overall_scale = self.scale * self.scale_factor
+        layer_scale = overall_scale ** (1 / self.depth)
         for i in range(self.depth):
+            X = X * layer_scale
             X = self.lin_layers[i](X)
             if i != self.depth - 1:
                 X = self.act_layers[i](X)
-        X = X * (self.scale * self.scale_factor)
         return X
 
     def penalty(self):
