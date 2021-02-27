@@ -66,7 +66,7 @@ all_X, all_Y = adder_train_set(num_inputs)
 # train_X, train_Y = rand_train_set(num_inputs)
 
 torch.random.manual_seed(0)
-train_mask = torch.rand([all_X.shape[0]]) < 0.5
+train_mask = torch.rand([all_X.shape[0]]) < 0.2
 torch.random.seed()
 train_X = all_X[train_mask, :]
 train_Y = all_Y[train_mask, :]
@@ -80,7 +80,7 @@ test_Y = all_Y[~train_mask, :]
 # # print(train_Y)
 
 ensemble_size = 1
-networks = [Network(widths=[num_inputs] + [128, 64, 32] + [train_Y.shape[1]],
+networks = [Network(widths=[num_inputs] + [128, 32, 16] + [train_Y.shape[1]],
                     pen_lin_coef=0.0,
                     pen_lin_exp=2.0,
                     pen_scale=0.01,
@@ -94,11 +94,11 @@ networks = [Network(widths=[num_inputs] + [128, 64, 32] + [train_Y.shape[1]],
 
 
 reaper_factor0 = 0.0
-reaper_factor1 = 0.05
+reaper_factor1 = 0.2
 lr0 = 0.1
-lr1 = 0.05
-beta0 = 0.995
-beta1 = 0.995
+lr1 = 0.01
+beta0 = 0.99
+beta1 = 0.99
 pen_act0 = 0.0
 pen_act1 = 0.0
 pen_lin_coef0 = 0.0

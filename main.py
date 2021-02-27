@@ -10,6 +10,7 @@ import sparselin_pytorch
 import math
 from grouped_adam import GroupedAdam
 from high_order_act_pytorch import HighOrderActivation, HighOrderActivationB
+from tame_pytorch import GateActivation
 
 logging.basicConfig(format='%(asctime)s %(message)s',
                     level=logging.INFO,
@@ -196,24 +197,26 @@ class Network(torch.nn.Module):
         # self.output_bias = torch.nn.Parameter(torch.zeros([self.widths[-1]], dtype=dtype, device=device))
         # self.output_scale = torch.nn.Parameter(torch.full([self.widths[-1]], init_scale / scale_factor, dtype=dtype, device=device))
         for i in range(self.depth):
-            # layer = torch.nn.Linear(widths[i], widths[i + 1])
-            # layer.weight.data = torch.randn([widths[i + 1], widths[i]]) / math.sqrt(widths[i] / 2)
-            # self.lin_layers.append(layer)
-            self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
-                                            init_bias=init_bias,
-                                            init_scale=init_scale,
-                                            pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
-                                            pen_scale_coef=pen_scale_coef,
-                                            dtype=dtype, device=device))
-            # bn = torch.nn.BatchNorm1d(widths[i + 1], momentum=1.0)
-            # bn.bias.data[:] = init_bias
-            # self.bn_layers.append(bn)
             if i != self.depth - 1:
+                self.lin_layers.append(L1Linear(widths[i], widths[i + 1] * 2,
+                                                init_bias=init_bias,
+                                                init_scale=init_scale,
+                                                pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
+                                                pen_scale_coef=pen_scale_coef,
+                                                dtype=dtype, device=device))
                 # self.act_layers.append(ReLU(widths[i + 1],
                 #                             pen_act=pen_act,
                 #                             target_act=target_act,
                 #                             dtype=dtype, device=device))
-                self.act_layers.append(HighOrderActivation(2, widths[i + 1] // 2, 2))
+                # self.act_layers.append(HighOrderActivation(2, widths[i + 1] // 2, 2))
+                self.act_layers.append(GateActivation(widths[i + 1]))
+            else:
+                self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
+                                                init_bias=init_bias,
+                                                init_scale=init_scale,
+                                                pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
+                                                pen_scale_coef=pen_scale_coef,
+                                                dtype=dtype, device=device))
 
     def forward(self, X):
         for i in range(self.depth):
@@ -294,10 +297,10 @@ pen_scale_coef1 = 5e-5
 # optimizers = [
 #     SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.05)
 #     for i in range(ensemble_size)]9
-# optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
-#               for i in range(ensemble_size)]
-optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
+optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
               for i in range(ensemble_size)]
+# optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15)
+#               for i in range(ensemble_size)]
 # optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.95)
 #               for i in range(ensemble_size)]
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.003, betas=(0.5, 0.5))
