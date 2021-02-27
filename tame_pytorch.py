@@ -48,6 +48,7 @@ class L1Linear(torch.nn.Module):
     def __init__(self, input_width, output_width,
                  pen_coef=0.0, pen_exp=2.0,
                  bias_factor=1.0,
+                 # scale_factor=1.0,
                  dtype=torch.float32, device=None,
                  num_iters=6):
         super().__init__()
@@ -56,6 +57,7 @@ class L1Linear(torch.nn.Module):
         self.pen_coef = pen_coef
         self.pen_exp = pen_exp
         self.bias_factor = bias_factor
+        # self.scale_factor = scale_factor
         self.weights_pos_neg = Simplex([input_width * 2, output_width], dim=0, dtype=dtype, device=device,
                                        num_iters=num_iters)
 
@@ -63,12 +65,14 @@ class L1Linear(torch.nn.Module):
         # self.weights_pos_neg.param.data[:, :] = 0.0
         # self.weights_pos_neg.param.data[self.active_input, torch.arange(output_width)] = 1.0
         self.bias = torch.nn.Parameter(torch.zeros([output_width], dtype=dtype, device=device))
+        # self.scale = torch.nn.Parameter(torch.ones([output_width], dtype=dtype, device=device))
 
     def forward(self, X):
         assert X.shape[1] == self.input_width
         self.cnt_rows = X.shape[0]
         weights = self.weights_pos_neg.param[:self.input_width, :] - self.weights_pos_neg.param[self.input_width:, :]
         return torch.matmul(X, weights) + self.bias.view(1, -1) * self.bias_factor
+        # return torch.matmul(X, weights) * (self.scale.view(1, -1) * self.scale_factor) + self.bias.view(1, -1) * self.bias_factor
 
     def penalty(self):
         w = self.weights_pos_neg.param
@@ -76,27 +80,18 @@ class L1Linear(torch.nn.Module):
         return pen_weight
 
 
-# class ReLU(torch.nn.Module):
-#     def __init__(self,
-#                  pen_act: float,
-#                  target_act: float):
-#         super().__init__()
-#         self.pen_act = pen_act
-#         self.target_act = target_act
-#
-#     def forward(self, X):
-#         self.X = X
-#         if self.X.requires_grad:
-#             self.X.retain_grad()
-#         out = torch.clamp(X, min=0.0)
-#         self.cnt_rows = X.shape[0]
-#         return out
-#
-#     def penalty(self):
-#         return self.pen_act * torch.sum(
-#             torch.clamp(self.X, min=0.0) * (1 - self.target_act) - torch.clamp(self.X, max=0.0) * self.target_act)
-#
-#
+class ReLU(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, X):
+        out = torch.clamp(X, min=0.0)
+        self.out = out
+        return out
+
+    def penalty(self):
+        return 0.0
+
 
 
 class MinOut(torch.nn.Module):
@@ -141,6 +136,41 @@ class D2Activation(ManifoldModule):
                           torch.where(Y >= -X,
                                       (PP - NP) / 2 * X + (PP + NP) / 2 * Y,
                                       -(NP + NN) / 2 * X + (NP - NN) / 2 * Y))
+        self.out = out
+        return out
+
+    def project(self):
+        self.params.data = torch.clamp(self.params.data, min=-1.0, max=1.0)
+
+    def penalty(self):
+        return 0.0
+
+
+class ClampedD2Activation(ManifoldModule):
+    """Clamped version of D2Activation."""
+    def __init__(self, input_groups):
+        super().__init__()
+        self.input_groups = input_groups
+        # self.params = torch.nn.Parameter(torch.rand([input_groups, 4]) * 2 - 1)
+        self.params = torch.nn.Parameter((torch.randint(0, 2, [input_groups, 4]) * 2 - 1).to(torch.float32))
+
+    def forward(self, inp):
+        inp_view = inp.view(inp.shape[0], self.input_groups, 2)
+        X = inp_view[:, :, 0]
+        Y = inp_view[:, :, 1]
+        PP = self.params[:, 0].view(1, -1)  # Value on (1, 1)
+        NP = self.params[:, 1].view(1, -1)  # Value on (-1, 1)
+        NN = self.params[:, 2].view(1, -1)  # Value on (-1, -1)
+        PN = self.params[:, 3].view(1, -1)  # Value on (1, -1)
+        out = torch.where(Y <= X,
+                          torch.where(Y >= -X,
+                                      (PP + PN) / 2 * X + (PP - PN) / 2 * Y,
+                                      (PN - NN) / 2 * X - (PN + NN) / 2 * Y),
+                          torch.where(Y >= -X,
+                                      (PP - NP) / 2 * X + (PP + NP) / 2 * Y,
+                                      -(NP + NN) / 2 * X + (NP - NN) / 2 * Y))
+        out = torch.clamp(out, min=0.0)
+        self.out = out
         return out
 
     def project(self):
@@ -165,6 +195,7 @@ class MonotoneA1Activation(ManifoldModule):
         out = torch.where(Y <= X,
                           PZ * X + (1 - PZ) * Y,
                           (1 - ZP) * X + ZP * Y)
+        self.out = out
         return out
 
     def project(self):
@@ -225,15 +256,23 @@ class MonotoneActivation(ManifoldModule):
 
 
 class GateActivation(torch.nn.Module):
-    def __init__(self, num_outputs):
+    def __init__(self, num_outputs, pen_act):
         super().__init__()
         self.num_outputs = num_outputs
+        self.pen_act = pen_act
 
     def forward(self, X):
         X1 = X.view(X.shape[0], 2, self.num_outputs)
-        G = X1[:, 0, :]
+        G = torch.clamp(X1[:, 0, :], min=0.0)
         Y = X1[:, 1, :]
-        return torch.min(torch.clamp(G, min=0.0), torch.abs(Y)) * torch.sgn(Y)
+        out = torch.min(G, torch.abs(Y)) * torch.sgn(Y)
+        self.G = G
+        self.out = out
+        return out
+
+    def penalty(self):
+        return self.pen_act * torch.sum(torch.abs(self.out))
+        # return self.pen_act * torch.sum(self.G)
 
 
 class Network(torch.nn.Module):
@@ -242,7 +281,8 @@ class Network(torch.nn.Module):
                  pen_lin_coef: float = 0.0,
                  pen_lin_exp: float = 2.0,
                  pen_scale: float = 0.0,
-                 scale_init: float = 0.0,
+                 pen_act: float = 0.0,
+                 scale_init: float = 1.0,
                  scale_factor: float = 1.0,
                  bias_factor: float = 1.0,
                  arity: int = 2,
@@ -262,24 +302,27 @@ class Network(torch.nn.Module):
                 # self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
                 #                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
                 #                                 dtype=dtype, device=device))
-                # self.act_layers.append(torch.nn.ReLU())
+                # self.act_layers.append(ReLU())
 
                 self.lin_layers.append(L1Linear(widths[i], widths[i + 1] * arity,
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
+                                                # scale_factor=scale_factor,
                                                 bias_factor=bias_factor,
                                                 dtype=dtype, device=device))
-                self.act_layers.append(GateActivation(widths[i + 1]))
-                # self.act_layers.append(D2Activation(widths[i + 1]))
+                # self.act_layers.append(GateActivation(widths[i + 1], pen_act))
+                self.act_layers.append(D2Activation(widths[i + 1]))
+                # self.act_layers.append(ClampedD2Activation(widths[i + 1]))
                 # self.act_layers.append(MonotoneA1Activation(widths[i + 1]))
                 # self.act_layers.append(MonotoneActivation(arity, widths[i + 1], 1))
                 # self.act_layers.append(MinOut(arity))
             else:
                 self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
+                                                # scale_factor=scale_factor,
                                                 dtype=dtype, device=device))
 
     def forward(self, X):
-        overall_scale = self.scale * self.scale_factor
+        overall_scale = torch.abs(self.scale) * self.scale_factor
         layer_scale = overall_scale ** (1 / self.depth)
         for i in range(self.depth):
             X = X * layer_scale
@@ -289,8 +332,8 @@ class Network(torch.nn.Module):
         return X
 
     def penalty(self):
-        return sum(layer.penalty() for layer in self.lin_layers) + \
-            self.pen_scale * (self.scale * self.scale_factor) ** 2
+        return sum(layer.penalty() for layer in self.act_layers) + \
+               self.pen_scale * (self.scale * self.scale_factor) ** 2
         # return sum(layer.penalty() for layer in self.lin_layers) + \
         #     self.pen_scale * torch.sum((self.scale * self.scale_factor) ** 2)
 

@@ -79,7 +79,7 @@ test_Y = all_Y[~train_mask, :]
 # test_Y = all_Y
 # # print(train_Y)
 
-ensemble_size = 1
+ensemble_size = 4
 networks = [Network(widths=[num_inputs] + [128, 32, 16] + [train_Y.shape[1]],
                     pen_lin_coef=0.0,
                     pen_lin_exp=2.0,

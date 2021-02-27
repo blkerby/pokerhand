@@ -59,6 +59,7 @@ class GroupedAdam(torch.optim.Optimizer):
 
                 if len(p.shape) == 2:
                     denom = torch.mean(exp_avg_sq, dim=0, keepdim=True).sqrt().add_(group['eps'])
+                    # denom = torch.max(exp_avg_sq, dim=0, keepdim=True)[0].sqrt().add_(group['eps'])
                 else:
                     denom = exp_avg_sq.sqrt().add_(group['eps'])
 
