@@ -223,6 +223,19 @@ class MonotoneActivation(ManifoldModule):
         self.params.data[:, 2 ** self.arity - 1, :] = 1.0
 
 
+
+class GateActivation(torch.nn.Module):
+    def __init__(self, num_outputs):
+        super().__init__()
+        self.num_outputs = num_outputs
+
+    def forward(self, X):
+        X1 = X.view(X.shape[0], 2, self.num_outputs)
+        G = X1[:, 0, :]
+        Y = X1[:, 1, :]
+        return torch.min(torch.clamp(G, min=0.0), torch.abs(Y)) * torch.sgn(Y)
+
+
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
@@ -255,9 +268,10 @@ class Network(torch.nn.Module):
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
                                                 bias_factor=bias_factor,
                                                 dtype=dtype, device=device))
+                self.act_layers.append(GateActivation(widths[i + 1]))
                 # self.act_layers.append(D2Activation(widths[i + 1]))
                 # self.act_layers.append(MonotoneA1Activation(widths[i + 1]))
-                self.act_layers.append(MonotoneActivation(arity, widths[i + 1], 1))
+                # self.act_layers.append(MonotoneActivation(arity, widths[i + 1], 1))
                 # self.act_layers.append(MinOut(arity))
             else:
                 self.lin_layers.append(L1Linear(widths[i], widths[i + 1],

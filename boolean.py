@@ -59,10 +59,10 @@ def rand_train_set(num_inputs):
 
 
 num_inputs = 12
-# all_X, all_Y = adder_train_set(num_inputs)
+all_X, all_Y = adder_train_set(num_inputs)
 # all_X, all_Y = prime_train_set(num_inputs)
 # all_X, all_Y = sum_eq_train_set(num_inputs, 5)
-all_X, all_Y = xor_train_set(num_inputs)
+# all_X, all_Y = xor_train_set(num_inputs)
 # train_X, train_Y = rand_train_set(num_inputs)
 
 torch.random.manual_seed(0)
@@ -80,14 +80,14 @@ test_Y = all_Y[~train_mask, :]
 # # print(train_Y)
 
 ensemble_size = 1
-networks = [Network(widths=[num_inputs] + [64, 32, 16] + [train_Y.shape[1]],
+networks = [Network(widths=[num_inputs] + [128, 64, 32] + [train_Y.shape[1]],
                     pen_lin_coef=0.0,
                     pen_lin_exp=2.0,
                     pen_scale=0.01,
-                    arity=8,
+                    arity=2,
                     scale_init=1.0,
-                    scale_factor=1e-5,
-                    bias_factor=0.0,
+                    scale_factor=0.25,
+                    bias_factor=0.1,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
@@ -96,19 +96,19 @@ networks = [Network(widths=[num_inputs] + [64, 32, 16] + [train_Y.shape[1]],
 reaper_factor0 = 0.0
 reaper_factor1 = 0.05
 lr0 = 0.1
-lr1 = 0.1
-beta0 = 0.998
-beta1 = 0.998
+lr1 = 0.05
+beta0 = 0.995
+beta1 = 0.995
 pen_act0 = 0.0
 pen_act1 = 0.0
 pen_lin_coef0 = 0.0
 pen_lin_coef1 = 0.0
-pen_scale0 = 0.0  #0.03
-pen_scale1 = 0.0  #0.03
-optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
-              for i in range(ensemble_size)]
-# optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
+pen_scale0 = 0.0  #0.1
+pen_scale1 = 0.0  #0.1
+# optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
 #               for i in range(ensemble_size)]
+optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
+              for i in range(ensemble_size)]
 # optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.9)
 #               for i in range(ensemble_size)]
 
@@ -196,7 +196,8 @@ for _ in range(1, 10001):
 
             wt_fracs = []
             for layer in networks[0].lin_layers:
-                wt_fracs.append(torch.sum(layer.weights_pos_neg.param > 1e-8).to(torch.float32) / layer.weights_pos_neg.param.shape[1])
+                weights = layer.weights_pos_neg.param[:layer.input_width, :] - layer.weights_pos_neg.param[layer.input_width:, :]
+                wt_fracs.append(torch.sum(weights != 0).to(torch.float32) / layer.weights_pos_neg.param.shape[1])
                 # weights = layer.weight
                 # wt_fracs.append(torch.mean((weights != 0).to(torch.float32)))
             wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
