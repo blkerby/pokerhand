@@ -58,8 +58,8 @@ class GroupedAdam(torch.optim.Optimizer):
                 exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
 
                 if len(p.shape) == 2:
-                    denom = torch.mean(exp_avg_sq, dim=0, keepdim=True).sqrt().add_(group['eps'])
-                    # denom = torch.max(exp_avg_sq, dim=0, keepdim=True)[0].sqrt().add_(group['eps'])
+                    # denom = torch.mean(exp_avg_sq, dim=0, keepdim=True).sqrt().add_(group['eps'])
+                    denom = torch.max(exp_avg_sq, dim=0, keepdim=True)[0].sqrt().add_(group['eps'])
                 else:
                     denom = exp_avg_sq.sqrt().add_(group['eps'])
 

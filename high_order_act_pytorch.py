@@ -101,8 +101,12 @@ class HighOrderActivationB(torch.nn.Module):
         assert X.shape[1] == self.input_groups * self.arity
         X1 = X.view(X.shape[0], self.input_groups, self.arity)
         out1 = high_order_act_b(X1, self.params)
-        return out1.view(X.shape[0], self.input_groups * self.out_dim)
+        out = out1.view(X.shape[0], self.input_groups * self.out_dim)
+        self.out = out
+        return out
 
+    def penalty(self):
+        return 0.0
 
 # m = 4
 # n = 3

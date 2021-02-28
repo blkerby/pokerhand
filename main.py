@@ -89,10 +89,12 @@ networks = [TameNetwork(widths=[train_X.shape[1]] + [32, 32, 32] + [10],
                     pen_lin_coef=0.0,  # 0.001,
                     pen_lin_exp=5.0,
                     scale_init=100.0,
-                    scale_factor=30.0, #50.0,
+                    scale_factor=1e-5, #1.0,
                     bias_factor=1.0,
                     pen_act=0.0,
+                    target_act=0.0,
                     pen_scale=0.0,  #0.01,
+                    top_k=32,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
@@ -108,18 +110,21 @@ for net in networks:
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
 batch_size = 2048
-lr0 = 0.02
-lr1 = 0.02
-beta0 = 0.98
-beta1 = 0.98
+lr0 = 0.01
+lr1 = 0.01
+top_k0 = [32, 32, 32]
+top_k1 = [32, 32, 32]
+# top_k1 = [24, 8, 8]
+beta0 = 0.9
+beta1 = 0.9
 reaper_factor0 = 0.0
-reaper_factor1 = 0.0  #0.1
+reaper_factor1 = 0.2
 # act_reaper_factor0 = 0.0
 # act_reaper_factor1 = 0.2
-pen_act0 = 0.0
-pen_act1 = 0.0 # 1e-4
-# target_act0 = 0.3
-# target_act1 = 0.1
+pen_act0 = 1e-4
+pen_act1 = 1e-4
+target_act0 = 0.5
+target_act1 = 0.5
 # pen_lin_coef0 = 0.0
 # pen_lin_coef1 = 0.001
 # pen_scale_coef0 = 5e-5
@@ -145,9 +150,14 @@ logging.info(optimizers[0])
 average_params = [[torch.zeros_like(p) for p in net.parameters()] for net in networks]
 # average_batch_norm_running_mean = [[torch.zeros_like(b._buffers['running_mean']) for b in net.bn_layers] for net in networks]
 # average_batch_norm_running_var = [[torch.zeros_like(b._buffers['running_var']) for b in net.bn_layers] for net in networks]
-average_param_beta = 0.995
+average_param_beta = 0.95
 average_param_weight = 0.0
 iteration = 1
+
+# for net in networks:
+#     for layer in net.lin_layers[:-1]:
+#         layer.bias.data[:] = 0.5 / layer.bias_factor
+#         # layer.bias.data[:(layer.bias.shape[0] // 2)] = 1.0 / layer.bias_factor
 
 with torch.no_grad():
     for net in networks:
@@ -155,11 +165,14 @@ with torch.no_grad():
             if isinstance(mod, ManifoldModule):
                 mod.project()
 for _ in range(1, 50001):
-    frac = min(iteration / 4000, 1.0)
+    frac = min(iteration / 2000, 1.0)
     for net in networks:
         for layer in net.act_layers:
             layer.pen_act = frac * pen_act1 + (1 - frac) * pen_act0
-    #         layer.target_act = frac * target_act1 + (1 - frac) * target_act0
+            layer.target_act = frac * target_act1 + (1 - frac) * target_act0
+        for i, layer in enumerate(net.sparsifier_layers):
+            top_k = frac * top_k1[i] + (1 - frac) * top_k0[i]
+            layer.k = top_k
     #     for layer in net.lin_layers:
     #         layer.pen_coef = frac * pen_lin_coef1 + (1 - frac) * pen_lin_coef0
     #         layer.pen_scale_coef = frac * pen_scale_coef1 + (1 - frac) * pen_scale_coef0
@@ -179,7 +192,8 @@ for _ in range(1, 50001):
         obj = train_loss + net.penalty()
         obj.backward()
 
-        gn = torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
+        # gn = torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
+        gn = 0.0
 
         lr = lr0 * (1 - frac) + lr1 * frac
         beta = beta0 * (1 - frac) + beta1 * frac
@@ -291,7 +305,7 @@ for _ in range(1, 50001):
             scales_fmt = '{:.3f}'.format(networks[0].scale * networks[0].scale_factor)
 
             lr = optimizers[0].param_groups[0]['lr']
-            # lr = optimizers[0].param_groups[0]['lr']
+            lr = optimizers[0].param_groups[0]['lr']
             logging.info(
                 "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, wt={}, scale={}, act={}, abs={}, nz={}, gn={}".format(
                     iteration,
@@ -300,6 +314,14 @@ for _ in range(1, 50001):
                     float(test_loss / test_X.shape[0]),
                     float(test_acc),
                     wt_fracs_fmt, scales_fmt, act_avgs_fmt, act_abs_avgs_fmt, act_nz_avgs_fmt, gn))
+            # logging.info(
+            #     "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, wt={}, scale={}, gn={}".format(
+            #         iteration,
+            #         lr, total_loss / ensemble_size / batch_X.shape[0],
+            #             total_obj / ensemble_size / batch_X.shape[0],
+            #         float(test_loss / test_X.shape[0]),
+            #         float(test_acc),
+            #         wt_fracs_fmt, scales_fmt, gn))
     iteration += 1
 
 torch.set_printoptions(linewidth=120)
