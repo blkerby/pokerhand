@@ -108,8 +108,8 @@ for net in networks:
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
 batch_size = 2048
-lr0 = 0.03
-lr1 = 0.01
+lr0 = 0.02
+lr1 = 0.02
 beta0 = 0.98
 beta1 = 0.98
 reaper_factor0 = 0.0

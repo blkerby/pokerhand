@@ -275,6 +275,43 @@ class GateActivation(torch.nn.Module):
         # return self.pen_act * torch.sum(self.G)
 
 
+class TopKActivation(torch.nn.Module):
+    def __init__(self, num_inputs, arity, k):
+        super().__init__()
+        assert k <= arity
+        assert num_inputs % arity == 0
+        self.arity = arity
+        self.k = k
+        self.num_inputs = num_inputs
+
+    def forward(self, X):
+        X1 = X.view(X.shape[0], self.num_inputs // self.arity, self.arity)
+        values, indices = torch.topk(X1, self.k, dim=2, sorted=False)
+        out = torch.zeros_like(X1).scatter(2, indices, values)
+        self.out = out
+        return out.view(X.shape[0], X.shape[1])
+
+
+class Top1Activation(torch.nn.Module):
+    """Specialized implementation of TopKActivation for k=1, for better performance"""
+    def __init__(self, num_inputs, arity):
+        super().__init__()
+        assert num_inputs % arity == 0
+        self.arity = arity
+        self.num_inputs = num_inputs
+
+    def forward(self, X):
+        X1 = X.view(X.shape[0], self.num_inputs // self.arity, self.arity)
+        values, indices = torch.max(X1, dim=2)
+        out = torch.zeros_like(X1).scatter(2, indices.unsqueeze(2), values.unsqueeze(2))
+        self.out = out
+        return out.view(X.shape[0], X.shape[1])
+
+# act = Top1Activation(8, 4)
+# A = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]])
+# act(A)
+
+
 class Network(torch.nn.Module):
     def __init__(self,
                  widths: List[int],
@@ -285,7 +322,8 @@ class Network(torch.nn.Module):
                  scale_init: float = 1.0,
                  scale_factor: float = 1.0,
                  bias_factor: float = 1.0,
-                 arity: int = 2,
+                 arity: int = 4,
+                 top_k: int = 2,
                  dtype=torch.float32,
                  device=None):
         super().__init__()
@@ -304,13 +342,16 @@ class Network(torch.nn.Module):
                 #                                 dtype=dtype, device=device))
                 # self.act_layers.append(ReLU())
 
-                self.lin_layers.append(L1Linear(widths[i], widths[i + 1] * arity,
+                self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
+                # self.lin_layers.append(L1Linear(widths[i], widths[i + 1] * arity,
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
                                                 # scale_factor=scale_factor,
                                                 bias_factor=bias_factor,
                                                 dtype=dtype, device=device))
+                # self.act_layers.append(Top1Activation(widths[i + 1], 4))
+                self.act_layers.append(TopKActivation(widths[i + 1], arity, top_k))
                 # self.act_layers.append(GateActivation(widths[i + 1], pen_act))
-                self.act_layers.append(D2Activation(widths[i + 1]))
+                # self.act_layers.append(D2Activation(widths[i + 1]))
                 # self.act_layers.append(ClampedD2Activation(widths[i + 1]))
                 # self.act_layers.append(MonotoneA1Activation(widths[i + 1]))
                 # self.act_layers.append(MonotoneActivation(arity, widths[i + 1], 1))
@@ -332,8 +373,9 @@ class Network(torch.nn.Module):
         return X
 
     def penalty(self):
-        return sum(layer.penalty() for layer in self.act_layers) + \
-               self.pen_scale * (self.scale * self.scale_factor) ** 2
+        return 0.0
+        # return sum(layer.penalty() for layer in self.act_layers) + \
+        #        self.pen_scale * (self.scale * self.scale_factor) ** 2
         # return sum(layer.penalty() for layer in self.lin_layers) + \
         #     self.pen_scale * torch.sum((self.scale * self.scale_factor) ** 2)
 
