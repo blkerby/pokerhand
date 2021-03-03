@@ -159,11 +159,12 @@ class D2Activation(ManifoldModule):
     determined by its values on the four points (-1, -1), (-1, 1), (1, -1), (1, 1), which can be any values in the
     interval [-1, 1]."""
 
-    def __init__(self, input_groups):
+    def __init__(self, input_groups, act_factor=1.0):
         super().__init__()
         self.input_groups = input_groups
-        # self.params = torch.nn.Parameter(torch.rand([input_groups, 4]) * 2 - 1)
-        self.params = torch.nn.Parameter((torch.randint(0, 2, [input_groups, 4]) * 2 - 1).to(torch.float32))
+        self.act_factor = act_factor
+        self.params = torch.nn.Parameter(torch.rand([input_groups, 4]) * 2 - 1)
+        # self.params = torch.nn.Parameter((torch.randint(0, 2, [input_groups, 4]) * 2 - 1).to(torch.float32) / act_factor)
 
     def forward(self, inp):
         inp_view = inp.view(inp.shape[0], self.input_groups, 2)
@@ -180,11 +181,12 @@ class D2Activation(ManifoldModule):
                           torch.where(Y >= -X,
                                       (PP - NP) / 2 * X + (PP + NP) / 2 * Y,
                                       -(NP + NN) / 2 * X + (NP - NN) / 2 * Y))
+        out = out * self.act_factor
         self.out = out
         return out
 
     def project(self):
-        self.params.data = torch.clamp(self.params.data, min=-1.0, max=1.0)
+        self.params.data = torch.clamp(self.params.data, min=-1.0 / self.act_factor, max=1.0 / self.act_factor)
 
     def penalty(self):
         return 0.0
@@ -232,6 +234,124 @@ class B2Activation(ManifoldModule):
     function is uniquely determined by its values on the eight points (+/-1, +/-1), (+/-1, 0), (0, +/-1), subject
     to certain constraints."""
 
+    def __init__(self, input_groups, act_factor):
+        super().__init__()
+        self.input_groups = input_groups
+        self.act_factor = act_factor
+        self.params = torch.nn.Parameter((torch.randint(0, 2, [input_groups, 8]) * 2 - 1).to(torch.float32))
+        self.project()
+
+    def forward(self, inp):
+        inp_view = inp.view(inp.shape[0], self.input_groups, 2)
+        X = inp_view[:, :, 0]
+        Y = inp_view[:, :, 1]
+        P = self.params * self.act_factor
+        P0 = P[:, 0].view(1, -1)  # Value at (1, 0)
+        P1 = P[:, 1].view(1, -1)  # Value at (1, 1)
+        P2 = P[:, 2].view(1, -1)  # Value at (0, 1)
+        P3 = P[:, 3].view(1, -1)  # Value at (-1, 1)
+        P4 = P[:, 4].view(1, -1)  # Value at (-1, 0)
+        P5 = P[:, 5].view(1, -1)  # Value at (-1, -1)
+        P6 = P[:, 6].view(1, -1)  # Value at (0, -1)
+        P7 = P[:, 7].view(1, -1)  # Value at (1, -1)
+        XP = X >= 0
+        YP = Y >= 0
+        XY = torch.abs(X) >= torch.abs(Y)
+        out = torch.where(XP,
+                          torch.where(YP,
+                                      torch.where(XY,
+                                                  P0 * X + (P1 - P0) * Y,
+                                                  P2 * Y + (P1 - P2) * X),
+                                      torch.where(XY,
+                                                  P0 * X + (P0 - P7) * Y,
+                                                  -P6 * Y + (P7 - P6) * X)),
+                          torch.where(YP,
+                                      torch.where(XY,
+                                                  -P4 * X + (P3 - P4) * Y,
+                                                  P2 * Y + (P2 - P3) * X),
+                                      torch.where(XY,
+                                                  -P4 * X + (P4 - P5) * Y,
+                                                  -P6 * Y + (P6 - P5) * X)))
+        self.out = out
+        return out
+
+    def project(self):
+        a = self.act_factor
+        for i in [1, 3, 5, 7]:
+            self.params.data[:, i].clamp_(min=-1.0 / a, max=1.0 / a)
+        for i in [0, 2, 4, 6]:
+            P0 = self.params.data[:, i - 1]
+            P2 = self.params.data[:, (i + 1) % 8]
+            upper_lim = torch.min((P0 + 1 / a) / 2, (P2 + 1 / a) / 2)
+            lower_lim = torch.max((P0 - 1 / a) / 2, (P2 - 1 / a) / 2)
+            self.params.data[:, i] = torch.max(torch.min(self.params.data[:, i], upper_lim), lower_lim)
+
+    def penalty(self):
+        return 0.0
+
+
+
+class B2ActivationModified(ManifoldModule):
+    """Quick and dirty modification to B2Activation to force the output to be zero when any of the inputs are zero
+    (i.e., keeping only the parameters for the 2^n corners with coordinates +/1, and setting all other parameters
+    to zero)."""
+
+    def __init__(self, input_groups):
+        super().__init__()
+        self.input_groups = input_groups
+        self.params = torch.nn.Parameter((torch.randint(0, 2, [input_groups, 8]) * 2 - 1).to(torch.float32))
+        self.project()
+
+    def forward(self, inp):
+        inp_view = inp.view(inp.shape[0], self.input_groups, 2)
+        X = inp_view[:, :, 0]
+        Y = inp_view[:, :, 1]
+        P1 = self.params[:, 1].view(1, -1)  # Value at (1, 1)
+        P3 = self.params[:, 3].view(1, -1)  # Value at (-1, 1)
+        P5 = self.params[:, 5].view(1, -1)  # Value at (-1, -1)
+        P7 = self.params[:, 7].view(1, -1)  # Value at (1, -1)
+        P0 = torch.zeros_like(P1)
+        P2 = P0
+        P4 = P0
+        P6 = P0
+        XP = X >= 0
+        YP = Y >= 0
+        XY = torch.abs(X) >= torch.abs(Y)
+        out = torch.where(XP,
+                          torch.where(YP,
+                                      torch.where(XY,
+                                                  P0 * X + (P1 - P0) * Y,
+                                                  P2 * Y + (P1 - P2) * X),
+                                      torch.where(XY,
+                                                  P0 * X + (P0 - P7) * Y,
+                                                  -P6 * Y + (P7 - P6) * X)),
+                          torch.where(YP,
+                                      torch.where(XY,
+                                                  -P4 * X + (P3 - P4) * Y,
+                                                  P2 * Y + (P2 - P3) * X),
+                                      torch.where(XY,
+                                                  -P4 * X + (P4 - P5) * Y,
+                                                  -P6 * Y + (P6 - P5) * X)))
+        self.out = out
+        return out
+
+    def project(self):
+        for i in [1, 3, 5, 7]:
+            self.params.data[:, i].clamp_(min=-1.0, max=1.0)
+        for i in [0, 2, 4, 6]:
+            P0 = self.params.data[:, i - 1]
+            P2 = self.params.data[:, (i + 1) % 8]
+            upper_lim = torch.min((P0 + 1) / 2, (P2 + 1) / 2)
+            lower_lim = torch.max((P0 - 1) / 2, (P2 - 1) / 2)
+            self.params.data[:, i] = torch.max(torch.min(self.params.data[:, i], upper_lim), lower_lim)
+
+    def penalty(self):
+        return 0.0
+
+
+class B2ActivationNonnegative(ManifoldModule):
+    """Modification of B2Activation to restrict output to be nonnegative."""
+
     def __init__(self, input_groups):
         super().__init__()
         self.input_groups = input_groups
@@ -272,8 +392,8 @@ class B2Activation(ManifoldModule):
         return out
 
     def project(self):
-        for i in [1, 3, 5, 7]:
-            self.params.data[:, i].clamp_(min=-1.0, max=1.0)
+        for i in range(8):
+            self.params.data[:, i].clamp_(min=0.0, max=1.0)
         for i in [0, 2, 4, 6]:
             P0 = self.params.data[:, i - 1]
             P2 = self.params.data[:, (i + 1) % 8]
@@ -283,8 +403,6 @@ class B2Activation(ManifoldModule):
 
     def penalty(self):
         return 0.0
-
-
 
 
 class A1Activation(ManifoldModule):
@@ -320,7 +438,7 @@ class A1Activation(ManifoldModule):
     def project(self):
         self.params.data[:, 1].clamp_(min=-1.0, max=1.0)
         upper_lim = (self.params.data[:, 1] + 1) / 2
-        lower_lim = (self.params.data[:, 1] + 1) / 2
+        lower_lim = (self.params.data[:, 1] - 1) / 2
         self.params.data[:, 0] = torch.max(torch.min(self.params.data[:, 0], upper_lim), lower_lim)
         self.params.data[:, 2] = torch.max(torch.min(self.params.data[:, 2], upper_lim), lower_lim)
 
@@ -366,20 +484,22 @@ def high_order_act(A, params):
 
 
 class MonotoneActivation(ManifoldModule):
-    def __init__(self, arity, input_groups, out_dim):
+    def __init__(self, arity, input_groups, out_dim, act_factor = 1.0):
         super().__init__()
         self.arity = arity
         self.input_groups = input_groups
         self.out_dim = out_dim
-        self.params = torch.nn.Parameter(torch.randint(0, 2, [input_groups, 2 ** arity, out_dim]).to(torch.float32))
+        self.act_factor = act_factor
+        # self.params = torch.nn.Parameter(torch.randint(0, 2, [input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
+        self.params = torch.nn.Parameter(torch.rand([input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
         self.project()
-        self.params.data = torch.round(self.params.data)
+        self.params.data = torch.round(self.params.data * self.act_factor) / self.act_factor
 
     def forward(self, X):
         assert len(X.shape) == 2
         assert X.shape[1] == self.input_groups * self.arity
         X1 = X.view(X.shape[0], self.input_groups, self.arity)
-        out1 = high_order_act(X1, self.params)
+        out1 = high_order_act(X1, self.params) * self.act_factor
         self.out = out1
         return out1.view(X.shape[0], self.input_groups * self.out_dim)
 
@@ -387,7 +507,7 @@ class MonotoneActivation(ManifoldModule):
         # Compute the greatest monotone lower bound and least monotone upper bound and average them.
         # Theoretically it would be better to use the Euclidean projection but that would be more
         # difficult to compute.
-        clamped = torch.clamp(self.params, min=0.0, max=1.0)
+        clamped = torch.clamp(self.params, min=0.0, max=1.0 / self.act_factor)
         lower = clamped
         upper = clamped.clone()
         for i in range(self.arity):
@@ -400,10 +520,56 @@ class MonotoneActivation(ManifoldModule):
             upper_max = torch.max(upper_view[:, :, 0, :, :], upper_view[:, :, 1, :, :])
             upper_view[:, :, 1, :, :] = upper_max
         self.params.data = (lower + upper) / 2
-        self.params.data[:, 2 ** self.arity - 1, :] = 1.0
+        self.params.data[:, 2 ** self.arity - 1, :] = 1.0 / self.act_factor
 
     def penalty(self):
         return 0.0
+
+
+
+class ClampedMonotoneActivation(ManifoldModule):
+    def __init__(self, arity, input_groups, out_dim, act_factor = 1.0):
+        super().__init__()
+        self.arity = arity
+        self.input_groups = input_groups
+        self.out_dim = out_dim
+        self.act_factor = act_factor
+        # self.params = torch.nn.Parameter(torch.randint(0, 2, [input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
+        self.params = torch.nn.Parameter(torch.rand([input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
+        self.bias = torch.nn.Parameter(torch.zeros([input_groups, out_dim], dtype=torch.float32))
+        self.project()
+        self.params.data = torch.round(self.params.data * self.act_factor) / self.act_factor
+
+    def forward(self, X):
+        assert len(X.shape) == 2
+        assert X.shape[1] == self.input_groups * self.arity
+        X1 = X.view(X.shape[0], self.input_groups, self.arity)
+        out1 = torch.clamp(high_order_act(X1, self.params) * self.act_factor + self.bias.unsqueeze(0), min=0.0)
+        self.out = out1
+        return out1.view(X.shape[0], self.input_groups * self.out_dim)
+
+    def project(self):
+        # Compute the greatest monotone lower bound and least monotone upper bound and average them.
+        # Theoretically it would be better to use the Euclidean projection but that would be more
+        # difficult to compute.
+        clamped = torch.clamp(self.params, min=0.0, max=1.0 / self.act_factor)
+        lower = clamped
+        upper = clamped.clone()
+        for i in range(self.arity):
+            shape0 = 2 ** i
+            shape1 = 2 ** (self.arity - i - 1)
+            lower_view = lower.view(self.input_groups, shape0, 2, shape1, self.out_dim)
+            lower_min = torch.min(lower_view[:, :, 0, :, :], lower_view[:, :, 1, :, :])
+            lower_view[:, :, 0, :, :] = lower_min
+            upper_view = upper.view(self.input_groups, shape0, 2, shape1, self.out_dim)
+            upper_max = torch.max(upper_view[:, :, 0, :, :], upper_view[:, :, 1, :, :])
+            upper_view[:, :, 1, :, :] = upper_max
+        self.params.data = (lower + upper) / 2
+        self.params.data[:, 2 ** self.arity - 1, :] = 1.0 / self.act_factor
+
+    def penalty(self):
+        return 0.0
+
 
 class GateActivation(torch.nn.Module):
     def __init__(self, num_outputs, pen_act):
@@ -415,8 +581,12 @@ class GateActivation(torch.nn.Module):
         X1 = X.view(X.shape[0], 2, self.num_outputs)
         G = X1[:, 0, :]
         Y = X1[:, 1, :]
-        # out = torch.min(torch.clamp(G, min=0.0), torch.abs(Y)) * torch.sgn(Y)
-        out = torch.maximum(torch.minimum(Y, G), -G)
+        G_clamp = torch.clamp(G, min=0.0)
+        # out = torch.min(G_clamp, torch.abs(Y)) * torch.sgn(Y)
+        out = torch.maximum(torch.minimum(Y, G_clamp), -G_clamp)
+        # out = torch.minimum(Y, G_clamp)
+        # out = torch.maximum(torch.minimum(Y, G), -G)
+
         self.out = out
         return out
 
@@ -424,6 +594,26 @@ class GateActivation(torch.nn.Module):
         return self.pen_act * torch.sum(torch.abs(self.out))
         # return self.pen_act * torch.sum(self.G)
 
+
+
+class DoubleGateActivation(torch.nn.Module):
+    def __init__(self, num_outputs):
+        super().__init__()
+        self.num_outputs = num_outputs
+
+    def forward(self, X):
+        X1 = X.view(X.shape[0], 3, self.num_outputs)
+        GL = X1[:, 0, :]
+        GH = X1[:, 1, :]
+        Y = X1[:, 2, :]
+        GL_clamp = torch.clamp(GL, max=0.0)
+        GH_clamp = torch.clamp(GH, min=0.0)
+        out = torch.maximum(torch.minimum(Y, GH_clamp), GL_clamp)
+        self.out = out
+        return out
+
+    def penalty(self):
+        return 0.0
 
 class TopKSparsifier(torch.nn.Module):
     # TODO: Reimplement this using sparse output matrix
@@ -481,7 +671,8 @@ class Network(torch.nn.Module):
                  scale_init: float = 1.0,
                  scale_factor: float = 1.0,
                  bias_factor: float = 1.0,
-                 arity: int = 8,
+                 act_factor: float = 1.0,
+                 arity: int = 2,
                  top_k: float = 8,
                  dtype=torch.float32,
                  device=None):
@@ -492,7 +683,7 @@ class Network(torch.nn.Module):
         self.scale_factor = scale_factor
         self.lin_layers = torch.nn.ModuleList([])
         self.act_layers = torch.nn.ModuleList([])
-        self.sparsifier_layers = torch.nn.ModuleList([])
+        # self.sparsifier_layers = torch.nn.ModuleList([])
         # self.scale = torch.nn.Parameter(torch.full([widths[-1]], scale_init / scale_factor, dtype=dtype, device=device))
         self.scale = torch.nn.Parameter(torch.full([], scale_init / scale_factor, dtype=dtype, device=device))
         for i in range(self.depth):
@@ -502,19 +693,25 @@ class Network(torch.nn.Module):
                 #                                 dtype=dtype, device=device))
                 # self.act_layers.append(ReLU())
 
-                self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
+                self.lin_layers.append(L1Linear(widths[i], widths[i + 1] * 2,
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
                                                 # scale_factor=scale_factor,
                                                 bias_factor=bias_factor,
                                                 dtype=dtype, device=device))
-                # self.act_layers.append(GateActivation(widths[i + 1], pen_act))
-                # self.act_layers.append(D2Activation(widths[i + 1]))
-                # self.act_layers.append(B2Activation(widths[i + 1]))
+                # self.act_layers.append(ReLU())
+                self.act_layers.append(GateActivation(widths[i + 1], pen_act))
+                # self.act_layers.append(DoubleGateActivation(widths[i + 1]))
+                # self.act_layers.append(D2Activation(widths[i + 1], act_factor=act_factor))
+                # self.act_layers.append(B2ActivationModified(widths[i + 1]))
+                # self.act_layers.append(B2ActivationNonnegative(widths[i + 1]))
+                # self.act_layers.append(B2Activation(widths[i + 1], act_factor=act_factor))
                 # self.act_layers.append(A1Activation(widths[i + 1]))
                 # self.act_layers.append(ClampedD2Activation(widths[i + 1]))
                 # self.act_layers.append(MonotoneA1Activation(widths[i + 1]))
-                self.act_layers.append(MonotoneActivation(arity, widths[i + 1] // arity, arity))
+                # self.act_layers.append(ClampedMonotoneActivation(arity, widths[i + 1] // arity, arity, act_factor=act_factor))
+                # self.act_layers.append(MonotoneActivation(arity, widths[i + 1] // arity, arity, act_factor=act_factor))
                 # self.act_layers.append(MonotoneActivation(arity, widths[i + 1], 1))
+                # self.act_layers.append(MinOut(arity=arity))
                 # self.act_layers.append(ClampedMinOut(arity=arity, target_act=target_act, pen_act=pen_act))
                 # self.act_layers.append(HighOrderActivationB(2, widths[i + 1], 1))
                 # self.act_layers.append(PReLU(widths[i + 1]))
@@ -527,6 +724,7 @@ class Network(torch.nn.Module):
                                                 dtype=dtype, device=device))
 
     def forward(self, X):
+        self.cnt_rows = X.shape[0]
         overall_scale = torch.abs(self.scale) * self.scale_factor
         layer_scale = overall_scale ** (1 / self.depth)
         for i in range(self.depth):
@@ -539,7 +737,8 @@ class Network(torch.nn.Module):
 
     def penalty(self):
         # return 0.0
-        return sum(layer.penalty() for layer in self.act_layers)
-        #        self.pen_scale * (self.scale * self.scale_factor) ** 2
+        return sum(layer.penalty() for layer in self.act_layers) + \
+               sum(layer.penalty() for layer in self.lin_layers) #+ \
+               # self.cnt_rows * self.pen_scale * (self.scale * self.scale_factor - 1) ** 2
         # return sum(layer.penalty() for layer in self.lin_layers) + \
         #     self.pen_scale * torch.sum((self.scale * self.scale_factor) ** 2)
