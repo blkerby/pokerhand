@@ -28,7 +28,8 @@ def approx_simplex_projection(x: torch.tensor, dim: int, num_iters: int) -> torc
 
 
 class ManifoldModule(torch.nn.Module):
-    pass
+    def pre_step(self):
+        pass
 
 
 class Simplex(ManifoldModule):
@@ -51,6 +52,7 @@ class L1Linear(torch.nn.Module):
                  pen_coef=0.0, pen_exp=2.0,
                  bias_factor=1.0,
                  # scale_factor=1.0,
+                 noise_factor=0.0,
                  dtype=torch.float32, device=None,
                  num_iters=6):
         super().__init__()
@@ -59,6 +61,7 @@ class L1Linear(torch.nn.Module):
         self.pen_coef = pen_coef
         self.pen_exp = pen_exp
         self.bias_factor = bias_factor
+        self.noise_factor = noise_factor
         # self.scale_factor = scale_factor
         self.weights_pos_neg = Simplex([input_width * 2, output_width], dim=0, dtype=dtype, device=device,
                                        num_iters=num_iters)
@@ -72,7 +75,12 @@ class L1Linear(torch.nn.Module):
     def forward(self, X):
         assert X.shape[1] == self.input_width
         self.cnt_rows = X.shape[0]
-        weights = self.weights_pos_neg.param[:self.input_width, :] - self.weights_pos_neg.param[self.input_width:, :]
+        raw_weights = self.weights_pos_neg.param[:self.input_width, :] - self.weights_pos_neg.param[self.input_width:,
+                                                                         :]
+        if self.training and self.noise_factor != 0.0:
+            weights = raw_weights * (1 + torch.rand_like(raw_weights) * self.noise_factor)
+        else:
+            weights = raw_weights
         return torch.matmul(X, weights) + self.bias.view(1, -1) * self.bias_factor
         # return torch.matmul(X, weights) * (self.scale.view(1, -1) * self.scale_factor) + self.bias.view(1, -1) * self.bias_factor
 
@@ -234,17 +242,24 @@ class B2Activation(ManifoldModule):
     function is uniquely determined by its values on the eight points (+/-1, +/-1), (+/-1, 0), (0, +/-1), subject
     to certain constraints."""
 
-    def __init__(self, input_groups, act_factor):
+    def __init__(self, input_groups, act_factor, noise_factor):
         super().__init__()
         self.input_groups = input_groups
         self.act_factor = act_factor
+        # self.noise_factor = noise_factor
         self.params = torch.nn.Parameter((torch.randint(0, 2, [input_groups, 8]) * 2 - 1).to(torch.float32))
+        # self.old_params = None
         self.project()
 
     def forward(self, inp):
         inp_view = inp.view(inp.shape[0], self.input_groups, 2)
         X = inp_view[:, :, 0]
         Y = inp_view[:, :, 1]
+        # if self.training and self.noise_factor != 0.0:
+        #     P_noise = self.params * (1 + self.noise_factor * torch.randn_like(self.params))
+        # else:
+        #     P_noise = self.params
+        # P = P_noise * self.act_factor
         P = self.params * self.act_factor
         P0 = P[:, 0].view(1, -1)  # Value at (1, 0)
         P1 = P[:, 1].view(1, -1)  # Value at (1, 1)
@@ -258,24 +273,34 @@ class B2Activation(ManifoldModule):
         YP = Y >= 0
         XY = torch.abs(X) >= torch.abs(Y)
         out = torch.where(XP,
-                          torch.where(YP,
-                                      torch.where(XY,
-                                                  P0 * X + (P1 - P0) * Y,
-                                                  P2 * Y + (P1 - P2) * X),
-                                      torch.where(XY,
-                                                  P0 * X + (P0 - P7) * Y,
-                                                  -P6 * Y + (P7 - P6) * X)),
-                          torch.where(YP,
-                                      torch.where(XY,
-                                                  -P4 * X + (P3 - P4) * Y,
-                                                  P2 * Y + (P2 - P3) * X),
-                                      torch.where(XY,
-                                                  -P4 * X + (P4 - P5) * Y,
-                                                  -P6 * Y + (P6 - P5) * X)))
+                              torch.where(YP,
+                                          torch.where(XY,
+                                                      P0 * X + (P1 - P0) * Y,
+                                                      P2 * Y + (P1 - P2) * X),
+                                          torch.where(XY,
+                                                      P0 * X + (P0 - P7) * Y,
+                                                      -P6 * Y + (P7 - P6) * X)),
+                              torch.where(YP,
+                                          torch.where(XY,
+                                                      -P4 * X + (P3 - P4) * Y,
+                                                      P2 * Y + (P2 - P3) * X),
+                                          torch.where(XY,
+                                                      -P4 * X + (P4 - P5) * Y,
+                                                      -P6 * Y + (P6 - P5) * X)))
+        # if self.training and self.noise_factor != 0.0:
+        #     out = pre_out * (1 + self.noise_factor * torch.randn_like(pre_out))
+        # else:
+        #     out = pre_out
         self.out = out
         return out
 
+    # def pre_step(self):
+    #     self.old_params = self.params.data.clone()
+    #
     def project(self):
+        # if self.old_params is not None:
+        #     self.params.data = torch.where(torch.sgn(self.params.data) == -torch.sgn(self.old_params),
+        #                                    torch.zeros_like(self.params.data), self.params.data)
         a = self.act_factor
         for i in [1, 3, 5, 7]:
             self.params.data[:, i].clamp_(min=-1.0 / a, max=1.0 / a)
@@ -288,7 +313,6 @@ class B2Activation(ManifoldModule):
 
     def penalty(self):
         return 0.0
-
 
 
 class B2ActivationModified(ManifoldModule):
@@ -484,14 +508,15 @@ def high_order_act(A, params):
 
 
 class MonotoneActivation(ManifoldModule):
-    def __init__(self, arity, input_groups, out_dim, act_factor = 1.0):
+    def __init__(self, arity, input_groups, out_dim, act_factor=1.0):
         super().__init__()
         self.arity = arity
         self.input_groups = input_groups
         self.out_dim = out_dim
         self.act_factor = act_factor
         # self.params = torch.nn.Parameter(torch.randint(0, 2, [input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
-        self.params = torch.nn.Parameter(torch.rand([input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
+        self.params = torch.nn.Parameter(
+            torch.rand([input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
         self.project()
         self.params.data = torch.round(self.params.data * self.act_factor) / self.act_factor
 
@@ -526,16 +551,16 @@ class MonotoneActivation(ManifoldModule):
         return 0.0
 
 
-
 class ClampedMonotoneActivation(ManifoldModule):
-    def __init__(self, arity, input_groups, out_dim, act_factor = 1.0):
+    def __init__(self, arity, input_groups, out_dim, act_factor=1.0):
         super().__init__()
         self.arity = arity
         self.input_groups = input_groups
         self.out_dim = out_dim
         self.act_factor = act_factor
         # self.params = torch.nn.Parameter(torch.randint(0, 2, [input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
-        self.params = torch.nn.Parameter(torch.rand([input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
+        self.params = torch.nn.Parameter(
+            torch.rand([input_groups, 2 ** arity, out_dim]).to(torch.float32) / self.act_factor)
         self.bias = torch.nn.Parameter(torch.zeros([input_groups, out_dim], dtype=torch.float32))
         self.project()
         self.params.data = torch.round(self.params.data * self.act_factor) / self.act_factor
@@ -595,7 +620,6 @@ class GateActivation(torch.nn.Module):
         # return self.pen_act * torch.sum(self.G)
 
 
-
 class DoubleGateActivation(torch.nn.Module):
     def __init__(self, num_outputs):
         super().__init__()
@@ -614,6 +638,7 @@ class DoubleGateActivation(torch.nn.Module):
 
     def penalty(self):
         return 0.0
+
 
 class TopKSparsifier(torch.nn.Module):
     # TODO: Reimplement this using sparse output matrix
@@ -672,6 +697,7 @@ class Network(torch.nn.Module):
                  scale_factor: float = 1.0,
                  bias_factor: float = 1.0,
                  act_factor: float = 1.0,
+                 noise_factor: float = 0.0,
                  arity: int = 2,
                  top_k: float = 8,
                  dtype=torch.float32,
@@ -697,14 +723,15 @@ class Network(torch.nn.Module):
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
                                                 # scale_factor=scale_factor,
                                                 bias_factor=bias_factor,
+                                                noise_factor=0.0,  # noise_factor,
                                                 dtype=dtype, device=device))
+                # self.act_layers.append(GateActivation(widths[i + 1], pen_act))
+                self.act_layers.append(B2Activation(widths[i + 1], act_factor=act_factor, noise_factor=noise_factor))
                 # self.act_layers.append(ReLU())
-                self.act_layers.append(GateActivation(widths[i + 1], pen_act))
                 # self.act_layers.append(DoubleGateActivation(widths[i + 1]))
                 # self.act_layers.append(D2Activation(widths[i + 1], act_factor=act_factor))
                 # self.act_layers.append(B2ActivationModified(widths[i + 1]))
                 # self.act_layers.append(B2ActivationNonnegative(widths[i + 1]))
-                # self.act_layers.append(B2Activation(widths[i + 1], act_factor=act_factor))
                 # self.act_layers.append(A1Activation(widths[i + 1]))
                 # self.act_layers.append(ClampedD2Activation(widths[i + 1]))
                 # self.act_layers.append(MonotoneA1Activation(widths[i + 1]))
@@ -721,6 +748,7 @@ class Network(torch.nn.Module):
                 self.lin_layers.append(L1Linear(widths[i], widths[i + 1],
                                                 pen_coef=pen_lin_coef, pen_exp=pen_lin_exp,
                                                 # scale_factor=scale_factor,
+                                                noise_factor=0.0,  # noise_factor,
                                                 dtype=dtype, device=device))
 
     def forward(self, X):
@@ -738,7 +766,7 @@ class Network(torch.nn.Module):
     def penalty(self):
         # return 0.0
         return sum(layer.penalty() for layer in self.act_layers) + \
-               sum(layer.penalty() for layer in self.lin_layers) #+ \
-               # self.cnt_rows * self.pen_scale * (self.scale * self.scale_factor - 1) ** 2
+               sum(layer.penalty() for layer in self.lin_layers)  # + \
+        # self.cnt_rows * self.pen_scale * (self.scale * self.scale_factor - 1) ** 2
         # return sum(layer.penalty() for layer in self.lin_layers) + \
         #     self.pen_scale * torch.sum((self.scale * self.scale_factor) ** 2)

@@ -57,6 +57,33 @@ def load_data(filename):
     return X, Y
 
 
+class SAMOptimizer:
+    def __init__(self, base_optimizer: torch.optim.Optimizer, rho: float):
+        self.base_optimizer = base_optimizer
+        self.rho = rho
+
+    def first_step(self):
+        # Save the current parameters, and move against the gradient to bring them to the SAM point
+        self.saved_params = []
+        for group in self.base_optimizer.param_groups:
+            for param in group['params']:
+                self.saved_params.append(param.data.clone())
+                eps = 1e-15
+                param.data += param.grad * (self.rho / (torch.norm(param.grad) + eps))
+
+    def second_step(self):
+        # Restore the old parameters
+        i = 0
+        for group in self.base_optimizer.param_groups:
+            for param in group['params']:
+                param.data = self.saved_params[i]
+                i += 1
+
+        # Take a step in the SAM direction
+        self.base_optimizer.step()
+
+
+
 raw_train_X, train_Y = load_data('~/nn/datasets/poker/poker-hand-training-true.data')
 raw_test_X, test_Y = load_data('~/nn/datasets/poker/poker-hand-testing.data')
 
@@ -92,13 +119,14 @@ ensemble_size = 1
 networks = [TameNetwork(widths=[train_X.shape[1]] + [32, 32, 32] + [10],
                     pen_lin_coef=0.0,
                     pen_lin_exp=2.0,
-                    scale_init=800.0,
-                    scale_factor=1e-20,  #50.0,
+                    scale_init=400.0,
+                    scale_factor=50.0,  #50.0,
                     bias_factor=2.0,
                     pen_act=0.0,
                     target_act=0.0,
                     pen_scale=0.0,  #0.01,
                     act_factor=2.0,
+                    noise_factor=0.0,
                     arity=2,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
@@ -115,19 +143,20 @@ for net in networks:
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
 batch_size = 4096
-lr0 = 0.03
-lr1 = 0.03
+lr0 = 0.04
+lr1 = 0.002
 # top_k0 = [32, 32, 32]
 # top_k1 = [32, 32, 32]
 # top_k1 = [24, 8, 8]
-beta0 = 0.95
-beta1 = 0.95
+beta0 = 0.9
+beta1 = 0.9
 reaper_factor0 = 0.0
-reaper_factor1 = 0.1
+reaper_factor1 = 0.0
 # act_reaper_factor0 = 0.0
 # act_reaper_factor1 = 0.2
-# pen_act0 = 1e-4
-# pen_act1 = 1e-4
+pen_act0 = 0.0
+pen_act1 = 0.0  #1e-5
+# noise_factor = 0.1
 # target_act0 = 0.5
 # target_act1 = 0.5
 # pen_lin_coef0 = 0.0
@@ -141,7 +170,8 @@ reaper_factor1 = 0.1
 # optimizers = [
 #     SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.05)
 #     for i in range(ensemble_size)]
-optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
+optimizers = [SAMOptimizer(base_optimizer=GroupedAdam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15),
+                           rho=1e-3)
               for i in range(ensemble_size)]
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
 #               for i in range(ensemble_size)]
@@ -169,11 +199,13 @@ with torch.no_grad():
         for mod in net.modules():
             if isinstance(mod, ManifoldModule):
                 mod.project()
+        # for layer in net.act_layers:
+        #     layer.noise_factor = 0.1
 for _ in range(1, 50001):
     frac = min(iteration / 5000, 1.0)
-    # for net in networks:
-        # for layer in net.act_layers:
-            # layer.pen_act = frac * pen_act1 + (1 - frac) * pen_act0
+    for net in networks:
+        for layer in net.act_layers:
+            layer.pen_act = frac * pen_act1 + (1 - frac) * pen_act0
             # layer.target_act = frac * target_act1 + (1 - frac) * target_act0
         # for i, layer in enumerate(net.sparsifier_layers):
         #     top_k = frac * top_k1[i] + (1 - frac) * top_k0[i]
@@ -184,6 +216,8 @@ for _ in range(1, 50001):
 
     total_loss = 0.0
     total_obj = 0.0
+    total_sam_loss = 0.0
+    total_sam_obj = 0.0
     for j, net in enumerate(networks):
         net.train()
 
@@ -197,17 +231,33 @@ for _ in range(1, 50001):
         obj = train_loss + net.penalty()
         obj.backward()
 
-        gn = torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
-        # gn = 0.0
+        # gn = torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
+        gn = 0.0
+
+        # with torch.no_grad():
+        #     for net in networks:
+        #         for mod in net.modules():
+        #             if isinstance(mod, ManifoldModule):
+        #                 mod.pre_step()
+
+        optimizers[j].first_step()
+        net.zero_grad()
+        P = net(batch_X)
+        sam_loss = compute_loss(P, batch_Y)
+        sam_obj = sam_loss + net.penalty()
+        sam_obj.backward()
 
         lr = lr0 * (1 - frac) + lr1 * frac
         beta = beta0 * (1 - frac) + beta1 * frac
-        optimizers[j].param_groups[0]['lr'] = lr
-        optimizers[j].param_groups[0]['betas'] = (beta, beta)
+        optimizers[j].base_optimizer.param_groups[0]['lr'] = lr
+        optimizers[j].base_optimizer.param_groups[0]['betas'] = (beta, beta)
         # optimizers[j].param_groups[0]['betas'] = (0.99, 0.99)
-        optimizers[j].step()
+        optimizers[j].second_step()
+
         total_loss += train_loss
         total_obj += obj
+        total_sam_loss += sam_loss
+        total_sam_obj += sam_obj
         # print(train_loss, obj)
 
         reaper_factor = frac * reaper_factor1 + (1 - frac) * reaper_factor0
@@ -239,7 +289,7 @@ for _ in range(1, 50001):
             #                 1 - average_param_beta) * b._buffers['running_var']
         average_param_weight = average_param_beta * average_param_weight + (1 - average_param_beta)
 
-    if iteration % 500 == 0:
+    if iteration % 100 == 0:
         with torch.no_grad():
             saved_params = [[p.data.clone() for p in net.parameters()] for net in networks]
             # saved_batch_norm_running_mean = [[b._buffers['running_mean'].clone() for b in net.bn_layers] for net
@@ -309,12 +359,15 @@ for _ in range(1, 50001):
             # scales_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in scales))
             scales_fmt = '{:.3f}'.format(networks[0].scale * networks[0].scale_factor)
 
-            lr = optimizers[0].param_groups[0]['lr']
+            lr = optimizers[0].base_optimizer.param_groups[0]['lr']
             logging.info(
-                "{}: lr={:.6f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, wt={}, scale={}, act={}, abs={}, nz={}, gn={}".format(
+                "{}: lr={:.6f}, train={:.6f} ({:.6f}), obj={:.6f} ({:.6f}), test={:.6f}, acc={:.6f}, wt={}, scale={}, act={}, abs={}, nz={}, gn={}".format(
                     iteration,
-                    lr, total_loss / ensemble_size / batch_X.shape[0],
-                        total_obj / ensemble_size / batch_X.shape[0],
+                    lr,
+                    total_loss / ensemble_size / batch_X.shape[0],
+                    total_sam_loss / ensemble_size / batch_X.shape[0],
+                    total_obj / ensemble_size / batch_X.shape[0],
+                    total_sam_obj / ensemble_size / batch_X.shape[0],
                     float(test_loss / test_X.shape[0]),
                     float(test_acc),
                     wt_fracs_fmt, scales_fmt, act_avgs_fmt, act_abs_avgs_fmt, act_nz_avgs_fmt, gn))
