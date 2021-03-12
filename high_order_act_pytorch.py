@@ -1,5 +1,6 @@
 """PyTorch version of high-order activation. """
 
+from typing import List
 import torch
 
 """Activation function on `n` inputs which is an arbitrary continuous piecewise-linear function on R^n with
@@ -72,6 +73,15 @@ def high_order_act_b(A, params):
     return out
 
 
+def cartesian_power(values: List[float], power: int, dtype=torch.float32, device=None) -> torch.tensor:
+    if power == 0:
+        return torch.zeros([1, 0], dtype=dtype, device=device)
+    else:
+        A = cartesian_power(values, power - 1)
+        return torch.cat([torch.cat([torch.full([A.shape[0], 1], x, dtype=dtype, device=device), A], dim=1)
+                          for x in values], dim=0)
+
+
 class HighOrderActivation(torch.nn.Module):
     def __init__(self, arity, input_groups, out_dim):
         super().__init__()
@@ -79,13 +89,20 @@ class HighOrderActivation(torch.nn.Module):
         self.input_groups = input_groups
         self.out_dim = out_dim
         self.params = torch.nn.Parameter(torch.randn([input_groups, 2 ** arity, out_dim]))
+        param_coords = cartesian_power([0.0, 1.0], arity, dtype=torch.float32)
+        self.params.data[:, :, :] = torch.max(param_coords, dim=1)[0].view(1, 2 ** arity, 1)
 
     def forward(self, X):
         assert len(X.shape) == 2
         assert X.shape[1] == self.input_groups * self.arity
         X1 = X.view(X.shape[0], self.input_groups, self.arity)
         out1 = high_order_act(X1, self.params)
-        return out1.view(X.shape[0], self.input_groups * self.out_dim)
+        out = out1.view(X.shape[0], self.input_groups * self.out_dim)
+        self.out = out
+        return out
+
+    def penalty(self):
+        return 0.0
 
 
 class HighOrderActivationB(torch.nn.Module):
@@ -95,6 +112,8 @@ class HighOrderActivationB(torch.nn.Module):
         self.input_groups = input_groups
         self.out_dim = out_dim
         self.params = torch.nn.Parameter(torch.randn([input_groups, 3 ** arity, out_dim]))
+        param_coords = cartesian_power([-1.0, 0.0, 1.0], arity, dtype=torch.float32)
+        self.params.data[:, :, :] = torch.max(param_coords, dim=1)[0].view(1, 3 ** arity, 1)
 
     def forward(self, X):
         assert len(X.shape) == 2
