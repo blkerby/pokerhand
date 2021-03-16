@@ -113,7 +113,7 @@ class HighOrderActivationB(torch.nn.Module):
         self.out_dim = out_dim
         self.params = torch.nn.Parameter(torch.randn([input_groups, 3 ** arity, out_dim]))
         param_coords = cartesian_power([-1.0, 0.0, 1.0], arity, dtype=torch.float32)
-        self.params.data[:, :, :] = torch.max(param_coords, dim=1)[0].view(1, 3 ** arity, 1)
+        self.params.data[:, :, :] = torch.max(param_coords, dim=1)[0].view(1, 3 ** arity, 1)  # Initialize as maxout
 
     def forward(self, X):
         assert len(X.shape) == 2

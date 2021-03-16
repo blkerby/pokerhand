@@ -200,7 +200,7 @@ test_X = torch.from_numpy(preprocessor.transform(raw_test_X.T)).to(torch.float32
 #
 
 ensemble_size = 1
-networks = [TameNetwork(widths=[train_X.shape[1]] + 3 * [20] + [10],
+networks = [TameNetwork(widths=[train_X.shape[1]] + 3 * [16] + [10],
                     pen_lin_coef=0.0,
                     pen_lin_exp=2.0,
                     scale_init=500.0,
@@ -244,17 +244,18 @@ for net in networks:
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
 batch_size = 2048
-lr0 = 0.005
-lr1 = 0.0005
+lr0 = 0.01
+lr1 = 0.01
 # top_k0 = [32, 32, 32]
 # top_k1 = [32, 32, 32]
 # top_k1 = [24, 8, 8]
-beta0 = 0.95
-beta1 = 0.95
+beta0 = 0.9
+beta1 = 0.9
 reaper_factor0 = 0.0
-reaper_factor1 = 0.2
+reaper_factor1 = 0.1
+# noise_factor = 1.0
 act_reaper_factor0 = 0.0
-act_reaper_factor1 = 0.005
+act_reaper_factor1 = 0.2  # 0.05
 pen_act0 = 0.0
 pen_act1 = 0.0
 # noise_factor = 0.1
@@ -286,7 +287,7 @@ logging.info(optimizers[0])
 average_params = [[torch.zeros_like(p) for p in net.parameters()] for net in networks]
 # average_batch_norm_running_mean = [[torch.zeros_like(b._buffers['running_mean']) for b in net.bn_layers] for net in networks]
 # average_batch_norm_running_var = [[torch.zeros_like(b._buffers['running_var']) for b in net.bn_layers] for net in networks]
-average_param_beta = 0.98
+average_param_beta = 0.998
 average_param_weight = 0.0
 iteration = 1
 #     for layer in net.lin_layers[:-1]:
@@ -307,7 +308,7 @@ with torch.no_grad():
         # for layer in net.act_layers:
         #     layer.noise_factor = 0.1
 for _ in range(1, 50001):
-    frac = min(iteration / 6000, 1.0)
+    frac = min(iteration / 10000, 1.0)
     # for net in networks:
     #     for layer in net.act_layers:
     #         layer.pen_act = frac * pen_act1 + (1 - frac) * pen_act0
@@ -321,11 +322,13 @@ for _ in range(1, 50001):
 
     total_loss = 0.0
     total_obj = 0.0
+    average_param_weight = average_param_beta * average_param_weight + (1 - average_param_beta)
     for j, net in enumerate(networks):
         net.train()
 
         batch_ind = torch.randint(0, train_X.shape[0], [batch_size])
         batch_X = preprocessor.augment(train_X[batch_ind, :])
+        # batch_X = train_X[batch_ind, :]
         batch_Y = train_Y[batch_ind]
 
         net.zero_grad()
@@ -368,9 +371,10 @@ for _ in range(1, 50001):
         with torch.no_grad():
             for mod in net.modules():
                 if isinstance(mod, L1Linear):
-                    # noise = torch.rand_like(mod.weights_pos_neg.param)
+                    noise = torch.rand_like(mod.weights_pos_neg.param)
                     # mod.weights_pos_neg.param *= (1 + noise_factor * noise)
                     mod.weights_pos_neg.param *= (1 + reaper_factor * lr)
+                    # mod.weights_pos_neg.param *= (1 + reaper_factor * lr * (1 + noise_factor * noise))
                     # mod.weights_pos_neg.param *= (1 + reaper_factor * lr * noise)
                     # mod.bias -= act_factor * lr
                 if isinstance(mod, (HighOrderActivationB, HighOrderActivation)):
@@ -395,12 +399,12 @@ for _ in range(1, 50001):
             #     layer.weight.data[:, :] = weight_sgn * torch.clamp(weight_abs - l1_pen_coef * lr, min=0.0)
             for i, p in enumerate(net.parameters()):
                 average_params[j][i] = average_param_beta * average_params[j][i] + (1 - average_param_beta) * p
+                p.data = average_param_beta * p + (1 - average_param_beta) * average_params[j][i] / average_param_weight
             # for i, b in enumerate(net.bn_layers):
             #     average_batch_norm_running_mean[j][i] = average_param_beta * average_batch_norm_running_mean[j][i] + (
             #                 1 - average_param_beta) * b._buffers['running_mean']
             #     average_batch_norm_running_var[j][i] = average_param_beta * average_batch_norm_running_var[j][i] + (
             #                 1 - average_param_beta) * b._buffers['running_var']
-        average_param_weight = average_param_beta * average_param_weight + (1 - average_param_beta)
 
     if iteration % 500 == 0:
         with torch.no_grad():
@@ -424,7 +428,7 @@ for _ in range(1, 50001):
                 cumulative_preds.append(torch.zeros_like(test_P))
             cumulative_preds.append(test_P + cumulative_preds[-1])
             n_capture = min(int(math.ceil((len(cumulative_preds) - 1) * capture_frac)), max_capture)
-            test_P = (cumulative_preds[-1] - cumulative_preds[-1 - n_capture]) / n_capture
+            # test_P = (cumulative_preds[-1] - cumulative_preds[-1 - n_capture]) / n_capture
 
             test_loss = compute_loss(test_P, test_Y)
             test_acc = compute_accuracy(test_P, test_Y)
