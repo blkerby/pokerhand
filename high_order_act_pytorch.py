@@ -106,26 +106,50 @@ class HighOrderActivation(torch.nn.Module):
 
 
 class HighOrderActivationB(torch.nn.Module):
-    def __init__(self, arity, input_groups, out_dim):
+    def __init__(self, arity, input_groups, out_dim, act_init=1.0, act_factor=1.0):
         super().__init__()
         self.arity = arity
         self.input_groups = input_groups
         self.out_dim = out_dim
+        self.act_factor = act_factor
         self.params = torch.nn.Parameter(torch.randn([input_groups, 3 ** arity, out_dim]))
         param_coords = cartesian_power([-1.0, 0.0, 1.0], arity, dtype=torch.float32)
-        self.params.data[:, :, :] = torch.max(param_coords, dim=1)[0].view(1, 3 ** arity, 1)  # Initialize as maxout
+        self.params.data[:, :, :] = torch.max(param_coords, dim=1)[0].view(1, 3 ** arity, 1) * act_init / act_factor  # Initialize as maxout
+        self.valency = self.arity + torch.sum((param_coords == 0.0).to(torch.float32), dim=1)  # Number of neighbors of each parameter
 
     def forward(self, X):
         assert len(X.shape) == 2
         assert X.shape[1] == self.input_groups * self.arity
         X1 = X.view(X.shape[0], self.input_groups, self.arity)
         out1 = high_order_act_b(X1, self.params)
-        out = out1.view(X.shape[0], self.input_groups * self.out_dim)
+        out = out1.view(X.shape[0], self.input_groups * self.out_dim) * self.act_factor
         self.out = out
         return out
 
+    def smoothen(self, weight_zero, weight_neighbor):
+        accum = torch.zeros_like(self.params)
+        for i in range(self.arity):
+            shape0 = 3 ** i
+            shape1 = 3 ** (self.arity - i - 1)
+            param_view = self.params.data.view(self.input_groups, shape0, 3, shape1, self.out_dim)
+            accum.view_as(param_view)[:, :, 0, :, :] += param_view[:, :, 1, :, :]
+            accum.view_as(param_view)[:, :, 1, :, :] += param_view[:, :, 0, :, :]
+            accum.view_as(param_view)[:, :, 1, :, :] += param_view[:, :, 2, :, :]
+            accum.view_as(param_view)[:, :, 2, :, :] += param_view[:, :, 1, :, :]
+        average_neighbor = accum / self.valency.unsqueeze(0).unsqueeze(2)
+        a = (1 - weight_zero) * (1 - weight_neighbor)
+        b = (1 - weight_zero) * weight_neighbor
+        self.params.data = a * self.params.data + b * average_neighbor
+
     def penalty(self):
         return 0.0
+
+
+# act = HighOrderActivationB(2, 1, 1)
+# print(act.params)
+# act.smoothen(0.0, 0.0)
+# print(act.params)
+
 
 # m = 4
 # n = 3

@@ -11,7 +11,7 @@ import math
 from grouped_adam import GroupedAdam
 from high_order_act_pytorch import HighOrderActivation, HighOrderActivationB
 from tame_pytorch import ManifoldModule, L1Linear
-from tame_pytorch import Network as TameNetwork, MultiGateNetwork, MultiplexerNetwork
+from tame_pytorch import Network as TameNetwork, MultiGateNetwork, MultiplexerNetwork, SparseHighOrderActivationB, D2Activation
 
 logging.basicConfig(format='%(asctime)s %(message)s',
                     level=logging.INFO,
@@ -95,7 +95,7 @@ class Preprocessor():
         self.encoder = sklearn.preprocessing.OneHotEncoder()
         encoded_suit = self.encoder.fit_transform(suit.numpy()).todense()
         self.scaler = sklearn.preprocessing.StandardScaler()
-        self.scaler.fit(rank)
+        self.scaler.fit(rank.reshape(-1, 1).repeat([1, 5]))
         # unscaled = np.concatenate([encoded_suit, rank.numpy()], axis=1)
         # self.scaler.fit(unscaled)
         # # self.scaler = sklearn.preprocessing.StandardScaler()
@@ -200,18 +200,13 @@ test_X = torch.from_numpy(preprocessor.transform(raw_test_X.T)).to(torch.float32
 #
 
 ensemble_size = 1
-networks = [TameNetwork(widths=[train_X.shape[1]] + 3 * [16] + [10],
-                    pen_lin_coef=0.0,
-                    pen_lin_exp=2.0,
-                    scale_init=500.0,
-                    scale_factor=1e-20,
+networks = [TameNetwork(widths=[train_X.shape[1]] + [32, 16] + [10],
                     bias_factor=1.0,
-                    pen_act=0.0,
-                    target_act=0.0,
-                    pen_scale=0.0,  #2e-6,
-                    act_factor=4.0,
-                    noise_factor=0.0,
-                    arity=3,
+                    act_init=1.0,
+                    act_factor=1.0,
+                    scale_init=100.0,
+                    scale_factor=50,
+                    arity=5,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
             for _ in range(ensemble_size)]
@@ -237,25 +232,32 @@ _, Y_cnt = torch.unique(train_Y, return_counts=True)
 Y_p = Y_cnt.to(torch.float32) / torch.sum(Y_cnt).to(torch.float32)
 Y_log_p = torch.log(Y_p)
 for net in networks:
-    # net.output_bias.data[:] = Y_log_p
-    net.lin_layers[-1].bias.data[:] = Y_log_p / net.lin_layers[-1].bias_factor
+    net.bias.data[:] = Y_log_p
+    # net.lin_layers[-1].bias.data[:] = Y_log_p
+    # net.lin_layers[-1].bias.data[:] = Y_log_p / net.lin_layers[-1].bias_factor
     # net.act_layers[-1].bias.data[:] = Y_log_p / net.act_layers[-1].bias_factor
 
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.001, betas=(0.995, 0.995))
 #               for i in range(ensemble_size)]
 batch_size = 2048
 lr0 = 0.01
-lr1 = 0.01
+lr1 = 0.001
 # top_k0 = [32, 32, 32]
 # top_k1 = [32, 32, 32]
 # top_k1 = [24, 8, 8]
-beta0 = 0.9
-beta1 = 0.9
+beta0 = 0.995
+beta1 = 0.995
 reaper_factor0 = 0.0
-reaper_factor1 = 0.1
+reaper_factor1 = 0.15
 # noise_factor = 1.0
 act_reaper_factor0 = 0.0
-act_reaper_factor1 = 0.2  # 0.05
+act_reaper_factor1 = 0.0
+smoothen_zero0 = 0.0
+smoothen_zero1 = 0.0
+smoothen_neighbor0 = 0.0
+smoothen_neighbor1 = 0.0
+scale_decay = 0.0
+
 pen_act0 = 0.0
 pen_act1 = 0.0
 # noise_factor = 0.1
@@ -272,10 +274,10 @@ target_act1 = 0.0
 # optimizers = [
 #     SAMOptimizer(base_optimizer=torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(0.95, 0.95), eps=1e-15), rho=0.05)
 #     for i in range(ensemble_size)]
-# optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
-#               for i in range(ensemble_size)]
-optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
+optimizers = [GroupedAdam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
               for i in range(ensemble_size)]
+# optimizers = [torch.optim.Adam(networks[i].parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
+#               for i in range(ensemble_size)]
 # optimizers = [torch.optim.SGD(networks[i].parameters(), lr=lr0, momentum=0.95)
 #               for i in range(ensemble_size)]
 # optimizers = [torch.optim.Adam(networks[i].parameters(), lr=0.003, betas=(0.5, 0.5))
@@ -308,7 +310,7 @@ with torch.no_grad():
         # for layer in net.act_layers:
         #     layer.noise_factor = 0.1
 for _ in range(1, 50001):
-    frac = min(iteration / 10000, 1.0)
+    frac = min(iteration / 8000, 1.0)
     # for net in networks:
     #     for layer in net.act_layers:
     #         layer.pen_act = frac * pen_act1 + (1 - frac) * pen_act0
@@ -337,8 +339,8 @@ for _ in range(1, 50001):
         obj = train_loss + net.penalty()
         obj.backward()
 
-        gn = torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
-        # gn = 0.0
+        # gn = torch.nn.utils.clip_grad_norm_(net.parameters(), 1e-5)
+        gn = 0.0
 
         # with torch.no_grad():
         #     for net in networks:
@@ -368,17 +370,24 @@ for _ in range(1, 50001):
 
         reaper_factor = frac * reaper_factor1 + (1 - frac) * reaper_factor0
         act_reaper_factor = frac * act_reaper_factor1 + (1 - frac) * act_reaper_factor0
+        smoothen_zero = frac * smoothen_zero1 + (1 - frac) * smoothen_zero0
+        smoothen_neighbor = frac * smoothen_neighbor1 + (1 - frac) * smoothen_neighbor0
         with torch.no_grad():
+            net.scale *= 1 - scale_decay * lr
             for mod in net.modules():
                 if isinstance(mod, L1Linear):
-                    noise = torch.rand_like(mod.weights_pos_neg.param)
+                    # noise = torch.rand_like(mod.weights_pos_neg.param)
                     # mod.weights_pos_neg.param *= (1 + noise_factor * noise)
                     mod.weights_pos_neg.param *= (1 + reaper_factor * lr)
                     # mod.weights_pos_neg.param *= (1 + reaper_factor * lr * (1 + noise_factor * noise))
                     # mod.weights_pos_neg.param *= (1 + reaper_factor * lr * noise)
                     # mod.bias -= act_factor * lr
-                if isinstance(mod, (HighOrderActivationB, HighOrderActivation)):
-                    mod.params.data *= (1 - act_reaper_factor * lr)
+                if isinstance(mod, HighOrderActivationB):
+                    mod.smoothen(weight_zero=smoothen_zero * lr * networks[0].act_layers[0].act_factor,
+                                 weight_neighbor=smoothen_neighbor * lr * networks[0].act_layers[0].act_factor)
+                if isinstance(mod, (HighOrderActivationB, HighOrderActivation, SparseHighOrderActivationB, D2Activation)):
+                    mod.params.data *= (1 - act_reaper_factor * lr * networks[0].act_layers[0].act_factor)
+                    # mod.params.data *= (1 - act_reaper_factor * lr)
                     # params_sgn = torch.sgn(mod.params.data)
                     # params_abs = torch.abs(mod.params.data)
                     # mod.params.data = params_sgn * torch.clamp(params_abs - act_reaper_factor * lr, min=0.0)
@@ -399,7 +408,7 @@ for _ in range(1, 50001):
             #     layer.weight.data[:, :] = weight_sgn * torch.clamp(weight_abs - l1_pen_coef * lr, min=0.0)
             for i, p in enumerate(net.parameters()):
                 average_params[j][i] = average_param_beta * average_params[j][i] + (1 - average_param_beta) * p
-                p.data = average_param_beta * p + (1 - average_param_beta) * average_params[j][i] / average_param_weight
+                # p.data = average_param_beta * p + (1 - average_param_beta) * average_params[j][i] / average_param_weight
             # for i, b in enumerate(net.bn_layers):
             #     average_batch_norm_running_mean[j][i] = average_param_beta * average_batch_norm_running_mean[j][i] + (
             #                 1 - average_param_beta) * b._buffers['running_mean']
@@ -480,28 +489,16 @@ for _ in range(1, 50001):
                 wt_fracs.append(torch.sum(weights != 0).to(torch.float32) / weights.shape[1])
             wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
 
-            # scales = []
-            # for layer in networks[0].lin_layers:
-            #     scales.append(torch.mean(torch.abs(layer.scale) * layer.scale_factor))
-            # scales_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in scales))
+            # # scales = []
+            # # for layer in networks[0].lin_layers:
+            # #     scales.append(torch.mean(torch.abs(layer.scale) * layer.scale_factor))
+            # # scales_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in scales))
             scales_fmt = '{:.3f}'.format(networks[0].scale * networks[0].scale_factor)
 
             lr = optimizers[0].param_groups[0]['lr']
             beta = optimizers[0].param_groups[0]['betas'][0]
-            logging.info(
-                "{}: lr={:.4f}, beta={:.4f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, wt={}, act={}, scale={}, gn={:.3g}".format(
-                    iteration,
-                    lr,
-                    beta,
-                    total_loss / ensemble_size / batch_X.shape[0],
-                    # total_sam_loss / ensemble_size / batch_X.shape[0],
-                    total_obj / ensemble_size / batch_X.shape[0],
-                    # total_sam_obj / ensemble_size / batch_X.shape[0],
-                    float(test_loss / test_X.shape[0]),
-                    float(test_acc),
-                    wt_fracs_fmt, act_abs_avgs_fmt, scales_fmt, gn))
             # logging.info(
-            #     "{}: lr={:.4f}, beta={:.4f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, wt={}, scale={}, act={}, abs={}, nz={}, gn={}".format(
+            #     "{}: lr={:.4f}, beta={:.4f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, act={}, scale={}, gn={:.3g}".format(
             #         iteration,
             #         lr,
             #         beta,
@@ -511,29 +508,21 @@ for _ in range(1, 50001):
             #         # total_sam_obj / ensemble_size / batch_X.shape[0],
             #         float(test_loss / test_X.shape[0]),
             #         float(test_acc),
-            #         wt_fracs_fmt, scales_fmt, act_avgs_fmt, act_abs_avgs_fmt, act_nz_avgs_fmt, gn))
+            #         act_abs_avgs_fmt, scales_fmt, gn))
+            logging.info(
+                "{}: lr={:.4f}, beta={:.4f}, train={:.6f}, obj={:.6f}, test={:.6f}, acc={:.6f}, sc={}, wt={}, act={}, anz={}".format(
+                    iteration,
+                    lr,
+                    beta,
+                    total_loss / ensemble_size / batch_X.shape[0],
+                    # total_sam_loss / ensemble_size / batch_X.shape[0],
+                    total_obj / ensemble_size / batch_X.shape[0],
+                    # total_sam_obj / ensemble_size / batch_X.shape[0],
+                    float(test_loss / test_X.shape[0]),
+                    float(test_acc),
+                    scales_fmt,
+                    wt_fracs_fmt, act_abs_avgs_fmt, act_nz_avgs_fmt))
     iteration += 1
 
 torch.set_printoptions(linewidth=120)
 print(sklearn.metrics.confusion_matrix(test_Y, torch.argmax(test_P, dim=1)))
-
-# for net in networks:
-#     net.eval()
-# overall_scale = torch.abs(net.scale) * net.scale_factor
-# layer_scale = overall_scale ** (1 / net.depth)
-# # Y1S = train_X * layer_scale
-# Y1L = networks[0].lin_layers[0](train_X, layer_scale)
-# Y1A = networks[0].act_layers[0](Y1L)
-# # Y2S = Y1A * layer_scale
-# Y2L = networks[0].lin_layers[1](Y1A, layer_scale)
-# Y2A = networks[0].act_layers[1](Y2L)
-# # Y3S = Y2A * layer_scale
-# Y3L = networks[0].lin_layers[2](Y2A, layer_scale)
-# Y3A = networks[0].act_layers[2](Y3L)
-# # Y4S = Y3A * layer_scale
-# Y4L = networks[0].lin_layers[3](Y3A, layer_scale)
-#
-# print(torch.sum(Y1A != 0, dim=0))
-# print(torch.sum(Y2A != 0, dim=0))
-# print(torch.sum(Y3A != 0, dim=0))
-# # print(torch.sum(Y6 != 0, dim=0))
