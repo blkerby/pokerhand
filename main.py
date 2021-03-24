@@ -203,13 +203,13 @@ test_X = torch.from_numpy(preprocessor.transform(raw_test_X.T)).to(torch.float32
 class Model(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.network = TameNetwork(widths=[train_X.shape[1]] + [32, 16] + [10],
+        self.network = TameNetwork(widths=[train_X.shape[1]] + [16, 16, 16] + [10],
                     bias_factor=1.0,
                     act_init=1.0,
                     act_factor=1.0,
-                    scale_init=100.0,
-                    scale_factor=50,
-                    arity=5,
+                    scale_init=200.0,
+                    scale_factor=100,
+                    arity=3,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
 
@@ -223,6 +223,13 @@ class Model(torch.nn.Module):
             if isinstance(mod, ManifoldModule):
                 mod.project()
 
+    def contract(self, reaper_factor, scale_decay):
+        with torch.no_grad():
+            for mod in self.network.modules():
+                if isinstance(mod, L1Linear):
+                    mod.weights_pos_neg.param *= (1 + reaper_factor)
+            self.network.scale.data *= 1 - scale_decay
+
     def train_step(self, batch_X, batch_Y, optimizer):
         self.network.train()
         self.network.zero_grad()
@@ -230,7 +237,6 @@ class Model(torch.nn.Module):
         train_loss = compute_loss(P, batch_Y)
         train_loss.backward()
         optimizer.step()
-        self.project()
         self.train_loss = float(train_loss)
 
     def pull_towards(self, other_model, other_weight):
@@ -240,110 +246,163 @@ class Model(torch.nn.Module):
         for ps, po in zip(self_params, other_params):
             ps.data = (1 - other_weight) * ps.data + other_weight * po.data
 
+    def set_average(self, other_models):
+        self_params = list(self.network.parameters())
+        other_params = [list(model.parameters()) for model in other_models]
+        assert all(len(p) == len(self_params) for p in other_params)
+        for i in range(len(self_params)):
+            self_params[i].data = sum(p[i] for p in other_params) / len(other_params)
+
+    def copy(self, other_model):
+        self_params = list(self.network.parameters())
+        other_params = list(other_model.parameters())
+        assert len(self_params) == len(other_params)
+        for ps, po in zip(self_params, other_params):
+            ps.data.copy_(po)
+
+    def accumulate(self, other_models, weight):
+        self_params = list(self.network.parameters())
+        other_params = [list(model.parameters()) for model in other_models]
+        assert all(len(p) == len(self_params) for p in other_params)
+        for i in range(len(self_params)):
+            self_params[i].data += sum(p[i] for p in other_params) * weight
+
+    def zero(self):
+        for param in self.network.parameters():
+            param.data.zero_()
+
     def forward(self, X):
         self.network.eval()
         return self.network(X)
 
-fast_model = Model()
-avg_model = copy.deepcopy(fast_model)
-
+num_fast_models = 1
 batch_size = 2048
 lr0 = 0.01
-lr1 = 0.0005
+lr1 = 0.01
 beta0 = 0.99
 beta1 = 0.99
-reaper_factor0 = 0.05
-reaper_factor1 = 0.05
-scale_decay = 0.05
+reaper_factor0 = 0.1
+reaper_factor1 = 0.1
+scale_decay = 0.1
+# sync_frequency = 5
+eval_frequency = 500
+avg_pull_weight = 0.01
+fast_pull_weight = 0.01
 
-optimizer = GroupedAdam(fast_model.network.parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15)
+init_model = Model()
+fast_models = [copy.deepcopy(init_model) for _ in range(num_fast_models)]
+avg_model = copy.deepcopy(init_model)
+# avg_model.zero()
 
-logging.info(fast_model)
-logging.info(optimizer)
+optimizers = [GroupedAdam(model.network.parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15) for model in fast_models]
 
-avg_pull_weight = 0.005
-fast_pull_weight = 0.005
+logging.info(init_model)
+logging.info(optimizers[0])
+
 iteration = 1
 
 cumulative_preds = []
 capture_frac = 0.2
 max_capture = 20
 
-fast_model.project()
-avg_model.project()
+def do_eval():
+    with torch.no_grad():
+        test_P = avg_model(test_X)
+
+        if len(cumulative_preds) == 0:
+            cumulative_preds.append(torch.zeros_like(test_P))
+        cumulative_preds.append(test_P + cumulative_preds[-1])
+        n_capture = min(int(math.ceil((len(cumulative_preds) - 1) * capture_frac)), max_capture)
+        # test_P = (cumulative_preds[-1] - cumulative_preds[-1 - n_capture]) / n_capture
+
+        test_loss = compute_loss(test_P, test_Y)
+        test_acc = compute_accuracy(test_P, test_Y)
+
+        act_avgs = []
+        act_abs_avgs = []
+        act_nz_avgs = []
+        for layer in avg_model.network.act_layers:
+            act_avgs.append(torch.mean(layer.out))
+            act_abs_avgs.append(torch.mean(torch.abs(layer.out)))
+            act_nz_avgs.append(torch.mean((torch.abs(layer.out) > 1e-5).to(torch.float32)))
+        act_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_avgs))
+        act_abs_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_abs_avgs))
+        act_nz_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_nz_avgs))
+
+        wt_fracs = []
+        for layer in avg_model.network.lin_layers:
+            weights = layer.weights_pos_neg.param[:layer.input_width, :] - layer.weights_pos_neg.param[
+                                                                           layer.input_width:, :]
+            wt_fracs.append(torch.sum(weights != 0).to(torch.float32) / weights.shape[1])
+        wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
+
+        # # scales = []
+        # # for layer in networks[0].lin_layers:
+        # #     scales.append(torch.mean(torch.abs(layer.scale) * layer.scale_factor))
+        # # scales_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in scales))
+        scales_fmt = '{:.3f}'.format(avg_model.network.scale * avg_model.network.scale_factor)
+
+        lr = optimizers[0].param_groups[0]['lr']
+        beta = optimizers[0].param_groups[0]['betas'][0]
+        logging.info(
+            "{}: lr={:.4f}, beta={:.4f}, train={:.6f}, test={:.6f}, acc={:.6f}, sc={}, wt={}, act={}, anz={}".format(
+                iteration,
+                lr,
+                beta,
+                sum(fast_models[i].train_loss for i in range(num_fast_models)) / num_fast_models / batch_X.shape[0],
+                float(test_loss / test_X.shape[0]),
+                float(test_acc),
+                scales_fmt,
+                wt_fracs_fmt, act_abs_avgs_fmt, act_nz_avgs_fmt))
+
+
+for model in fast_models:
+    model.project()
+# avg_model.zero()
+# avg_model_ctr = 0
+eval_ctr = 0
 for _ in range(1, 50001):
-    frac = min(iteration / 8000, 1.0)
+    frac = min(iteration / 5000, 1.0)
     lr = lr0 * (1 - frac) + lr1 * frac
     beta = beta0 * (1 - frac) + beta1 * frac
-    optimizer.param_groups[0]['lr'] = lr
-    optimizer.param_groups[0]['betas'] = (beta, beta)
-
-    batch_ind = torch.randint(0, train_X.shape[0], [batch_size])
-    batch_X = preprocessor.augment(train_X[batch_ind, :])
-    # batch_X = train_X[batch_ind, :]
-    batch_Y = train_Y[batch_ind]
-
-    fast_model.train_step(batch_X, batch_Y, optimizer)
-
     reaper_factor = frac * reaper_factor1 + (1 - frac) * reaper_factor0
+
+    for i, model in enumerate(fast_models):
+        optimizers[i].param_groups[0]['lr'] = lr
+        optimizers[i].param_groups[0]['betas'] = (beta, beta)
+
+        batch_ind = torch.randint(0, train_X.shape[0], [batch_size])
+        # batch_X = preprocessor.augment(train_X[batch_ind, :])
+        batch_X = train_X[batch_ind, :]
+        batch_Y = train_Y[batch_ind]
+
+        model.train_step(batch_X, batch_Y, optimizers[i])
+        model.project()
+
     with torch.no_grad():
-        avg_model.pull_towards(fast_model, avg_pull_weight)
-        for mod in avg_model.network.modules():
-            if isinstance(mod, L1Linear):
-                mod.weights_pos_neg.param *= (1 + reaper_factor * lr)
-        avg_model.network.scale.data *= 1 - scale_decay * lr
+        for model in fast_models:
+            avg_model.pull_towards(model, avg_pull_weight)
+        # avg_model.contract(reaper_factor * lr, scale_decay * lr)
         avg_model.project()
-        fast_model.pull_towards(avg_model, fast_pull_weight)
+        for model in fast_models:
+            model.pull_towards(avg_model, fast_pull_weight)
 
-    if iteration % 500 == 0:
-        with torch.no_grad():
-            test_P = avg_model(test_X)
+        eval_ctr += 1
+        if eval_ctr == eval_frequency:
+            do_eval()
+            eval_ctr = 0
+        # avg_model.accumulate(fast_models, weight=1 / sync_frequency / len(fast_models))
+        # avg_model_ctr += 1
+        # if avg_model_ctr == sync_frequency:
+        #     avg_model_ctr = 0
+        #     for model in fast_models:
+        #         model.copy(avg_model)
+        #     eval_ctr += 1
+        #     if eval_ctr == eval_frequency:
+        #         do_eval()
+        #         eval_ctr = 0
+        #     avg_model.zero()
 
-            if len(cumulative_preds) == 0:
-                cumulative_preds.append(torch.zeros_like(test_P))
-            cumulative_preds.append(test_P + cumulative_preds[-1])
-            n_capture = min(int(math.ceil((len(cumulative_preds) - 1) * capture_frac)), max_capture)
-            # test_P = (cumulative_preds[-1] - cumulative_preds[-1 - n_capture]) / n_capture
-
-            test_loss = compute_loss(test_P, test_Y)
-            test_acc = compute_accuracy(test_P, test_Y)
-
-            act_avgs = []
-            act_abs_avgs = []
-            act_nz_avgs = []
-            for layer in avg_model.network.act_layers:
-                act_avgs.append(torch.mean(layer.out))
-                act_abs_avgs.append(torch.mean(torch.abs(layer.out)))
-                act_nz_avgs.append(torch.mean((torch.abs(layer.out) > 1e-5).to(torch.float32)))
-            act_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_avgs))
-            act_abs_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_abs_avgs))
-            act_nz_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_nz_avgs))
-
-            wt_fracs = []
-            for layer in avg_model.network.lin_layers:
-                weights = layer.weights_pos_neg.param[:layer.input_width, :] - layer.weights_pos_neg.param[
-                                                                               layer.input_width:, :]
-                wt_fracs.append(torch.sum(weights != 0).to(torch.float32) / weights.shape[1])
-            wt_fracs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in wt_fracs))
-
-            # # scales = []
-            # # for layer in networks[0].lin_layers:
-            # #     scales.append(torch.mean(torch.abs(layer.scale) * layer.scale_factor))
-            # # scales_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in scales))
-            scales_fmt = '{:.3f}'.format(avg_model.network.scale * avg_model.network.scale_factor)
-
-            lr = optimizer.param_groups[0]['lr']
-            beta = optimizer.param_groups[0]['betas'][0]
-            logging.info(
-                "{}: lr={:.4f}, beta={:.4f}, train={:.6f}, test={:.6f}, acc={:.6f}, sc={}, wt={}, act={}, anz={}".format(
-                    iteration,
-                    lr,
-                    beta,
-                    fast_model.train_loss / batch_X.shape[0],
-                    float(test_loss / test_X.shape[0]),
-                    float(test_acc),
-                    scales_fmt,
-                    wt_fracs_fmt, act_abs_avgs_fmt, act_nz_avgs_fmt))
     iteration += 1
 
 torch.set_printoptions(linewidth=120)

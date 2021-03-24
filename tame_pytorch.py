@@ -160,9 +160,9 @@ class PReLU(ManifoldModule):
         return out
 
     def project(self):
-        # self.slope_left.data = torch.clamp(self.slope_left.data, min=-1.0, max=1.0)
-        # self.slope_right.data = torch.clamp(self.slope_right.data, min=-1.0, max=1.0)
-        pass
+        self.slope_left.data = torch.clamp(self.slope_left.data, min=-1.0, max=1.0)
+        self.slope_right.data = torch.clamp(self.slope_right.data, min=-1.0, max=1.0)
+        # pass
 
     def penalty(self):
         return 0.0
