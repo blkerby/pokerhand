@@ -203,31 +203,33 @@ test_X = torch.from_numpy(preprocessor.transform(raw_test_X.T)).to(torch.float32
 class Model(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.network = TameNetwork(widths=[train_X.shape[1]] + [16, 16, 16] + [10],
+        self.network = TameNetwork(widths=[train_X.shape[1]] + [24, 24] + [10],
                     bias_factor=1.0,
                     act_init=1.0,
                     act_factor=1.0,
                     scale_init=200.0,
-                    scale_factor=100,
+                    scale_factor=1e-20,
                     arity=3,
                     dtype=torch.float32,
                     device=torch.device('cpu'))
 
-        _, Y_cnt = torch.unique(train_Y, return_counts=True)
-        Y_p = Y_cnt.to(torch.float32) / torch.sum(Y_cnt).to(torch.float32)
-        Y_log_p = torch.log(Y_p)
-        self.network.bias.data[:] = Y_log_p
+        # _, Y_cnt = torch.unique(train_Y, return_counts=True)
+        # Y_p = Y_cnt.to(torch.float32) / torch.sum(Y_cnt).to(torch.float32)
+        # Y_log_p = torch.log(Y_p)
+        # self.network.bias.data[:] = Y_log_p
 
     def project(self):
         for mod in self.network.modules():
             if isinstance(mod, ManifoldModule):
                 mod.project()
 
-    def contract(self, reaper_factor, scale_decay):
+    def contract(self, reaper_factor, act_decay, scale_decay):
         with torch.no_grad():
             for mod in self.network.modules():
                 if isinstance(mod, L1Linear):
                     mod.weights_pos_neg.param *= (1 + reaper_factor)
+            # for layer in self.network.act_layers:
+            #     layer.params.data *= 1 - act_decay
             self.network.scale.data *= 1 - scale_decay
 
     def train_step(self, batch_X, batch_Y, optimizer):
@@ -236,6 +238,7 @@ class Model(torch.nn.Module):
         P = self.network(batch_X)
         train_loss = compute_loss(P, batch_Y)
         train_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.network.parameters(), 1e-5)
         optimizer.step()
         self.train_loss = float(train_loss)
 
@@ -277,17 +280,22 @@ class Model(torch.nn.Module):
 
 num_fast_models = 1
 batch_size = 2048
-lr0 = 0.01
-lr1 = 0.01
+lr0 = 0.015
+lr1 = 0.0005
+p0 = 1.0
+p1 = 1.0
+lin_eps = 0.1
 beta0 = 0.99
 beta1 = 0.99
-reaper_factor0 = 0.1
-reaper_factor1 = 0.1
-scale_decay = 0.1
-# sync_frequency = 5
-eval_frequency = 500
+reaper_factor0 = 0.0
+reaper_factor1 = 0.0
+scale_decay = 0.0
+act_decay0 = 0.0
+act_decay1 = 0.0
+sync_frequency = 500
+eval_frequency = 1
 avg_pull_weight = 0.01
-fast_pull_weight = 0.01
+fast_pull_weight = 0.0
 
 init_model = Model()
 fast_models = [copy.deepcopy(init_model) for _ in range(num_fast_models)]
@@ -295,6 +303,7 @@ avg_model = copy.deepcopy(init_model)
 # avg_model.zero()
 
 optimizers = [GroupedAdam(model.network.parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15) for model in fast_models]
+# optimizers = [torch.optim.Adam(model.network.parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15) for model in fast_models]
 
 logging.info(init_model)
 logging.info(optimizers[0])
@@ -312,7 +321,7 @@ def do_eval():
         if len(cumulative_preds) == 0:
             cumulative_preds.append(torch.zeros_like(test_P))
         cumulative_preds.append(test_P + cumulative_preds[-1])
-        n_capture = min(int(math.ceil((len(cumulative_preds) - 1) * capture_frac)), max_capture)
+        # n_capture = min(int(math.ceil((len(cumulative_preds) - 1) * capture_frac)), max_capture)
         # test_P = (cumulative_preds[-1] - cumulative_preds[-1 - n_capture]) / n_capture
 
         test_loss = compute_loss(test_P, test_Y)
@@ -345,63 +354,71 @@ def do_eval():
         lr = optimizers[0].param_groups[0]['lr']
         beta = optimizers[0].param_groups[0]['betas'][0]
         logging.info(
-            "{}: lr={:.4f}, beta={:.4f}, train={:.6f}, test={:.6f}, acc={:.6f}, sc={}, wt={}, act={}, anz={}".format(
+            "{}: train={:.6f}, test={:.6f}, acc={:.6f}, sc={}, wt={}, act={}, anz={}".format(
                 iteration,
-                lr,
-                beta,
                 sum(fast_models[i].train_loss for i in range(num_fast_models)) / num_fast_models / batch_X.shape[0],
                 float(test_loss / test_X.shape[0]),
                 float(test_acc),
                 scales_fmt,
                 wt_fracs_fmt, act_abs_avgs_fmt, act_nz_avgs_fmt))
-
+    return test_P
 
 for model in fast_models:
     model.project()
-# avg_model.zero()
-# avg_model_ctr = 0
+avg_model.zero()
+avg_model_ctr = 0
 eval_ctr = 0
 for _ in range(1, 50001):
-    frac = min(iteration / 5000, 1.0)
+    frac = min(iteration / 8000, 1.0)
     lr = lr0 * (1 - frac) + lr1 * frac
     beta = beta0 * (1 - frac) + beta1 * frac
     reaper_factor = frac * reaper_factor1 + (1 - frac) * reaper_factor0
+    act_decay = frac * act_decay1 + (1 - frac) * act_decay0
+    p = frac * p1 + (1 - frac) * p0
 
     for i, model in enumerate(fast_models):
         optimizers[i].param_groups[0]['lr'] = lr
         optimizers[i].param_groups[0]['betas'] = (beta, beta)
+        # for layer in model.network.lin_layers:
+        #     layer.weights_pos_neg.p = p
+        #     layer.weights_pos_neg.eps = lin_eps
+        #     layer.weights_pos_neg.num_iters = 12
 
         batch_ind = torch.randint(0, train_X.shape[0], [batch_size])
-        # batch_X = preprocessor.augment(train_X[batch_ind, :])
-        batch_X = train_X[batch_ind, :]
+        batch_X = preprocessor.augment(train_X[batch_ind, :])
+        # batch_X = train_X[batch_ind, :]
         batch_Y = train_Y[batch_ind]
 
         model.train_step(batch_X, batch_Y, optimizers[i])
+        # model.contract(reaper_factor * lr, act_decay * lr, scale_decay * lr)
         model.project()
 
     with torch.no_grad():
-        for model in fast_models:
-            avg_model.pull_towards(model, avg_pull_weight)
+        # for model in fast_models:
+        #     avg_model.accumulate(fast_models[0])
+        #     avg_model.pull_towards(model, avg_pull_weight)
         # avg_model.contract(reaper_factor * lr, scale_decay * lr)
-        avg_model.project()
-        for model in fast_models:
-            model.pull_towards(avg_model, fast_pull_weight)
+        # avg_model.project()
+        # for model in fast_models:
+        #     model.pull_towards(avg_model, fast_pull_weight)
 
-        eval_ctr += 1
-        if eval_ctr == eval_frequency:
-            do_eval()
-            eval_ctr = 0
-        # avg_model.accumulate(fast_models, weight=1 / sync_frequency / len(fast_models))
-        # avg_model_ctr += 1
-        # if avg_model_ctr == sync_frequency:
-        #     avg_model_ctr = 0
-        #     for model in fast_models:
-        #         model.copy(avg_model)
-        #     eval_ctr += 1
-        #     if eval_ctr == eval_frequency:
-        #         do_eval()
-        #         eval_ctr = 0
-        #     avg_model.zero()
+        # eval_ctr += 1
+        # if eval_ctr == eval_frequency:
+        #     do_eval()
+        #     eval_ctr = 0
+        avg_model.accumulate(fast_models, weight=1 / sync_frequency / len(fast_models))
+        avg_model_ctr += 1
+        if avg_model_ctr == sync_frequency:
+            avg_model_ctr = 0
+            # avg_model.project()
+            # for model in fast_models:
+            #     model.copy(avg_model)
+            # avg_model.copy(fast_models[0])
+            eval_ctr += 1
+            if eval_ctr == eval_frequency:
+                test_P = do_eval()
+                eval_ctr = 0
+            avg_model.zero()
 
     iteration += 1
 

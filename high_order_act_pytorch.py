@@ -78,7 +78,7 @@ def cartesian_power(values: List[float], power: int, dtype=torch.float32, device
         return torch.zeros([1, 0], dtype=dtype, device=device)
     else:
         A = cartesian_power(values, power - 1)
-        return torch.cat([torch.cat([torch.full([A.shape[0], 1], x, dtype=dtype, device=device), A], dim=1)
+        return torch.cat([torch.cat([A, torch.full([A.shape[0], 1], x, dtype=dtype, device=device)], dim=1)
                           for x in values], dim=0)
 
 

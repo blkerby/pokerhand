@@ -1,5 +1,5 @@
 import torch
-from tame_pytorch import approx_simplex_projection
+# from tame_pytorch import approx_simplex_projection
 
 def weighted_simplex_projection_iteration(x0: torch.tensor, y: torch.tensor, w: torch.tensor, K: float, dim: int):
     mask = (x0 > 0).to(x0.dtype)
@@ -21,23 +21,30 @@ def concave_projection_iteration(x0: torch.tensor, y: torch.tensor, K: float, co
     return x1_mask
 
 
+def concave_projection(x0: torch.tensor, y: torch.tensor, K: float, cost_fn, cost_grad, dim, num_iters):
+    x = x0
+    for _ in range(num_iters):
+        x = concave_projection_iteration(x, y, K, cost_fn, cost_grad, dim)
+    return x
+
+
 def soft_lp_cost_grad(eps, p):
     c = (1 + eps) ** p - eps ** p
     cost = lambda x: ((x + eps) ** p - eps ** p) / c
     grad = lambda x: p * (x + eps) ** (p - 1) / c
     return cost, grad
+#
+# # cost_fn, cost_grad = soft_lp_cost_grad(1e-2, 0.8)
+# cost_fn, cost_grad = soft_lp_cost_grad(1e-2, 1.0)
+#
+# y = torch.rand([8])
+# x0 = torch.full_like(y, 1e-15)
+# K = 1.0
+# dim = 0
+# print(y)
+# x1 = x0
+# for _ in range(10):
+#     x1 = concave_projection_iteration(x1, y, K, cost_fn, cost_grad, dim)
+#     print(x1, torch.sum(cost_fn(x1)))
 
-# cost_fn, cost_grad = soft_lp_cost_grad(1e-2, 0.8)
-cost_fn, cost_grad = soft_lp_cost_grad(1e-2, 1.0)
-
-y = torch.rand([8])
-x0 = torch.full_like(y, 1e-15)
-K = 1.0
-dim = 0
-print(y)
-x1 = x0
-for _ in range(10):
-    x1 = concave_projection_iteration(x1, y, K, cost_fn, cost_grad, dim)
-    print(x1, torch.sum(cost_fn(x1)))
-
-print(approx_simplex_projection(y, dim, 10))
+# print(approx_simplex_projection(y, dim, 10))
