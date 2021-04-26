@@ -82,7 +82,7 @@ def cartesian_power(values: List[float], power: int, dtype=torch.float32, device
                           for x in values], dim=0)
 
 
-class HighOrderActivation(torch.nn.Module):
+class HighOrderActivationA(torch.nn.Module):
     def __init__(self, arity, input_groups, out_dim):
         super().__init__()
         self.arity = arity
@@ -143,6 +143,7 @@ class HighOrderActivationB(torch.nn.Module):
 
     def penalty(self):
         return 0.0
+
 
 
 # act = HighOrderActivationB(2, 1, 1)

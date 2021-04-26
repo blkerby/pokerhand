@@ -10,9 +10,9 @@ import logging
 import sparselin_pytorch
 import math
 from grouped_adam import GroupedAdam
-from high_order_act_pytorch import HighOrderActivation, HighOrderActivationB
-from tame_pytorch import ManifoldModule, L1Linear
-from tame_pytorch import Network as TameNetwork, MultiGateNetwork, MultiplexerNetwork, SparseHighOrderActivationB, D2Activation
+from tame_pytorch import ManifoldModule, L1Linear, LpLinear, L1LinearScaled
+from tame_pytorch import Network as TameNetwork, MultiGateNetwork, MultiplexerNetwork, SparseHighOrderActivationB, D2Activation, TransformerNetwork
+from tame_pytorch import approx_simplex_projection
 
 logging.basicConfig(format='%(asctime)s %(message)s',
                     level=logging.INFO,
@@ -22,7 +22,18 @@ logging.basicConfig(format='%(asctime)s %(message)s',
 
 
 def compute_loss(P, Y, weight=None):
-    return torch.nn.functional.cross_entropy(P, Y, weight=weight, reduction='sum')
+    # return torch.nn.functional.cross_entropy(P, Y, weight=weight, reduction='sum')
+    n = P.shape[0]
+    # P = approx_simplex_projection(P, dim=1, num_iters=6)
+    PY = P[torch.arange(n), Y]
+    # loss = torch.sum(torch.abs(P)) + torch.sum(torch.abs(PY - 1.0)) - torch.sum(torch.abs(PY))
+    P0 = torch.clamp(P, min=0.0)
+    PY0 = torch.clamp(PY, min=0.0)
+    PY1 = torch.clamp(PY, max=1.0)
+    loss = torch.sum(P0 ** 2) + torch.sum((1.0 - PY1) ** 2) - torch.sum(PY0 ** 2)
+    # loss = torch.sum(P ** 2) + torch.sum((1.0 - PY) ** 2) - torch.sum(PY ** 2)
+    # loss = torch.sum(P0) + torch.sum(1.0 - PY1) - torch.sum(PY0)
+    return loss
 
 
 def compute_accuracy(P, Y):
@@ -68,71 +79,68 @@ raw_train_X, train_Y = load_data('~/nn/datasets/poker/poker-hand-training-true.d
 raw_test_X, test_Y = load_data('~/nn/datasets/poker/poker-hand-testing.data')
 
 
-class Preprocessor():
-    def fit(self, X):
-        suit = X[:, 0::2]
-        rank = X[:, 1::2]
-        self.encoder = sklearn.preprocessing.OneHotEncoder()
-        encoded_suit = self.encoder.fit_transform(suit.numpy()).todense()
-        self.scaler = sklearn.preprocessing.StandardScaler()
-        self.scaler.fit(rank.reshape(-1, 1).repeat([1, 5]))
-        # unscaled = np.concatenate([encoded_suit, rank.numpy()], axis=1)
-        # self.scaler.fit(unscaled)
-        # # self.scaler = sklearn.preprocessing.StandardScaler()
-        # # self.scaler.fit(X)
-
-    def transform(self, X):
-        # return self.scaler.transform(X)
-        suit = X[:, 0::2]
-        rank = X[:, 1::2]
-        encoded_suit = self.encoder.transform(suit).todense()
-        scaled_rank = self.scaler.transform(rank)
-        out = np.concatenate([encoded_suit, scaled_rank], axis=1)
-        return out
-        # unscaled = np.concatenate([encoded_suit, rank.numpy()], axis=1)
-        # scaled = self.scaler.transform(unscaled)
-        # return scaled
-        # scaled_rank = self.scaler.transform(rank)
-        # return np.concatenate([encoded_suit, scaled_rank], axis=1)
-
-    def augment(self, X):
-        X = torch.clone(X)
-
-        # Shuffle the cards
-        card_perm = torch.randperm(5)
-        X[:, -5:] = X[:, -5 + card_perm]  # Shuffle their ranks
-        for suit in range(4):  # Shuffle their encoded suits
-            X[:, suit:-5:4] = X[:, suit + card_perm * 4]
-
-        # Shuffle the suits
-        suit_perm = torch.randperm(4)
-        for card in range(5):
-            X[:, (card * 4):((card + 1) * 4)] = X[:, card * 4 + suit_perm]
-        return X
-
-
-
 # class Preprocessor():
 #     def fit(self, X):
-#         pass
+#         suit = X[:, 0::2]
+#         rank = X[:, 1::2]
+#         self.encoder = sklearn.preprocessing.OneHotEncoder()
+#         encoded_suit = self.encoder.fit_transform(suit.numpy()).todense()
+#         # self.scaler = sklearn.preprocessing.StandardScaler()
+#         # self.scaler.fit(rank.reshape(-1, 1).repeat([1, 5]))
 #
 #     def transform(self, X):
-#         return X.numpy()
+#         # return self.scaler.transform(X)
+#         suit = X[:, 0::2]
+#         rank = X[:, 1::2]
+#         encoded_suit = self.encoder.transform(suit).todense()
+#         # scaled_rank = self.scaler.transform(rank)
+#         scaled_rank = rank
+#         out = np.concatenate([encoded_suit, scaled_rank], axis=1)
+#         return out
+#         # unscaled = np.concatenate([encoded_suit, rank.numpy()], axis=1)
+#         # scaled = self.scaler.transform(unscaled)
+#         # return scaled
+#         # scaled_rank = self.scaler.transform(rank)
+#         # return np.concatenate([encoded_suit, scaled_rank], axis=1)
 #
 #     def augment(self, X):
 #         X = torch.clone(X)
 #
 #         # Shuffle the cards
 #         card_perm = torch.randperm(5)
-#         X[:, ::2] = X[:, card_perm * 2]        # Shuffle their suits
-#         X[:, 1::2] = X[:, card_perm * 2 + 1]   # Shuffle their ranks
+#         X[:, -5:] = X[:, -5 + card_perm]  # Shuffle their ranks
+#         for suit in range(4):  # Shuffle their encoded suits
+#             X[:, suit:-5:4] = X[:, suit + card_perm * 4]
 #
 #         # Shuffle the suits
 #         suit_perm = torch.randperm(4)
 #         for card in range(5):
-#             X[:, ::2] = suit_perm[(X[:, ::2] - 1).to(torch.long)].to(torch.float32) + 1.0
-#
+#             X[:, (card * 4):((card + 1) * 4)] = X[:, card * 4 + suit_perm]
 #         return X
+
+
+
+class Preprocessor():
+    def fit(self, X):
+        pass
+
+    def transform(self, X):
+        return X.numpy()
+
+    def augment(self, X):
+        X = torch.clone(X)
+
+        # Shuffle the cards
+        card_perm = torch.randperm(5)
+        X[:, ::2] = X[:, card_perm * 2]        # Shuffle their suits
+        X[:, 1::2] = X[:, card_perm * 2 + 1]   # Shuffle their ranks
+
+        # Shuffle the suits
+        suit_perm = torch.randperm(4)
+        for card in range(5):
+            X[:, ::2] = suit_perm[(X[:, ::2] - 1).to(torch.long)].to(torch.float32) + 1.0
+
+        return X
 
 
 # class Preprocessor():
@@ -210,20 +218,27 @@ def sample_batch(n, X_splits, Y_splits, balancing_exp):
 class Model(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.network = TameNetwork(widths=[train_X.shape[1]] + [32, 32] + [10],
-                    bias_factor=1.0,
-                    act_init=1.0,
-                    act_factor=1.0,
-                    scale_init=200.0,
-                    scale_factor=1e-20,
-                    arity=3,
-                    dtype=torch.float32,
-                    device=torch.device('cpu'))
+        # self.network = TameNetwork(widths=[train_X.shape[1]] + [16, 16, 16] + [10],
+        #             bias_factor=1.0,
+        #             act_init=1.0,
+        #             act_factor=1.0,
+        #             scale_init=1.0,
+        #             scale_factor=1e-20,
+        #             arity=3,
+        #             # dropout_p=0.2,
+        #             dtype=torch.float32,
+        #             device=torch.device('cpu'))
+        self.network = TransformerNetwork(
+            widths=[2, 12, 12, 10],
+            arity=4,
+            dtype=torch.float32,
+            device=torch.device('cpu'))
 
-        _, Y_cnt = torch.unique(train_Y, return_counts=True)
-        Y_p = Y_cnt.to(torch.float32) / torch.sum(Y_cnt).to(torch.float32)
-        Y_log_p = torch.log(Y_p)
-        self.network.bias.data[:] = Y_log_p
+
+        # _, Y_cnt = torch.unique(train_Y, return_counts=True)
+        # Y_p = Y_cnt.to(torch.float32) / torch.sum(Y_cnt).to(torch.float32)
+        # Y_log_p = torch.log(Y_p)
+        # self.network.bias.data[:] = Y_log_p
 
     def project(self):
         self.network.project()
@@ -233,16 +248,22 @@ class Model(torch.nn.Module):
 
     def contract(self, reaper_factor, act_decay, scale_decay):
         with torch.no_grad():
-            for mod in self.network.modules():
-                if isinstance(mod, L1Linear):
-                    mod.weights_pos_neg.param *= (1 + reaper_factor)
-            for layer in self.network.act_layers:
-                layer.params.data *= 1 - act_decay
-            for layer in self.network.scale_layers:
-                layer.scale.data *= 1 - scale_decay
-            # for layer in self.network.lin_layers:
-            #     layer.scale.data *= 1 - scale_decay
-            # self.network.scale.data *= 1 - scale_decay
+            if reaper_factor != 0.0:
+                for mod in self.network.modules():
+                    if isinstance(mod, (L1Linear, LpLinear, L1LinearScaled)):
+                        mod.weights_pos_neg.param *= (1 + reaper_factor)
+            if act_decay != 0.0:
+                for layer in self.network.act_layers:
+                    # layer.params.data *= 1 - act_decay
+                    d = layer.params.data
+                    layer.params.data = torch.sgn(d) * torch.clamp(torch.abs(d) - act_decay, min=0.0)
+            if scale_decay != 0.0:
+            #     for layer in self.network.scale_layers:
+            #         d = layer.scale.data
+            #         layer.scale.data = torch.sgn(d) * torch.clamp(torch.abs(d) - scale_decay, min=0.0)
+                for layer in self.network.lin_layers:
+                    layer.scale.data *= 1 - scale_decay
+                # self.network.scale.data *= 1 - scale_decay
 
     def train_step(self, batch_X, batch_Y, batch_w, optimizer):
         self.network.train()
@@ -250,6 +271,7 @@ class Model(torch.nn.Module):
         P = self.network(batch_X)
         train_loss = compute_loss(P, batch_Y, weight=batch_w)
         train_loss.backward()
+        # torch.nn.utils.clip_grad_norm_(self.network.parameters(), 1.0)
         torch.nn.utils.clip_grad_norm_(self.network.parameters(), 1e-5)
         optimizer.step()
         self.train_loss = float(train_loss)
@@ -293,20 +315,22 @@ class Model(torch.nn.Module):
 
 num_fast_models = 1
 batch_size = 2048
+eval_batch_size = 8192
 balancing_exp = 0.5
-lr0 = 0.03
-lr1 = 0.03
+lr0 = 0.015
+lr1 = 0.003
 p0 = 1.0
 p1 = 1.0
-lin_eps = 0.1
+lin_eps0 = 0.1
+lin_eps1 = 0.1
 beta0 = 0.99
-beta1 = 0.995
+beta1 = 0.99
 reaper_factor0 = 0.0
-reaper_factor1 = 0.01
+reaper_factor1 = 0.0
 scale_decay0 = 0.0
-scale_decay1 = 0.1
+scale_decay1 = 0.0
 act_decay0 = 0.0
-act_decay1 = 0.1
+act_decay1 = 0.0
 sync_frequency = 500
 eval_frequency = 1
 # unstick_frequency = 5
@@ -321,6 +345,7 @@ eval_model = copy.deepcopy(init_model)
 
 # optimizers = [GroupedAdam(model.network.parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15) for model in fast_models]
 optimizers = [torch.optim.Adam(model.network.parameters(), lr=lr0, betas=(beta0, beta0), eps=1e-15) for model in fast_models]
+# optimizers = [torch.optim.SGD(model.network.parameters(), lr=lr0, momentum=0.99) for model in fast_models]
 
 logging.info(init_model)
 logging.info(optimizers[0])
@@ -333,7 +358,14 @@ max_capture = 20
 
 def do_eval(model):
     with torch.no_grad():
-        test_P = model(test_X)
+        test_P_list = []
+        num_batches = (test_X.shape[0] + eval_batch_size - 1) // eval_batch_size
+        for i in range(num_batches):
+            batch_X = test_X[(i * eval_batch_size):((i + 1) * eval_batch_size), :]
+            P = model(batch_X)
+            test_P_list.append(P)
+        test_P = torch.cat(test_P_list, dim=0)
+        # test_P = model(test_X)
 
         if len(cumulative_preds) == 0:
             cumulative_preds.append(torch.zeros_like(test_P))
@@ -345,15 +377,20 @@ def do_eval(model):
         test_acc = compute_accuracy(test_P, test_Y)
 
         act_avgs = []
+        act_ranges = []
         act_abs_avgs = []
         act_nz_avgs = []
         act_activity_max = []
-        for layer in model.network.act_layers:
+        for tlayer in model.network.transformer_layers:
+        # for layer in model.network.act_layers:
         # for layer in model.network.scale_layers:
-            act_avgs.append(torch.mean(layer.out))
-            act_abs_avgs.append(torch.mean(torch.abs(layer.out)))
-            act_nz_avgs.append(torch.mean((torch.abs(layer.out) > 1e-5).to(torch.float32)))
+            layer = tlayer.act_layer
+            act_ranges.append(torch.max(torch.max(layer.out, dim=0, keepdim=True)[0] - torch.min(layer.out, dim=0, keepdim=True)[0]))
+            med = torch.median(layer.out, dim=0, keepdim=True)[0]
+            act_abs_avgs.append(torch.mean(torch.abs(layer.out - med)))
+            act_nz_avgs.append(torch.mean((torch.abs(layer.out - med) > 1e-5).to(torch.float32)))
             # act_activity_max.append(torch.max(layer._compute_activity()) * layer.act_factor)
+        act_ranges_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_ranges))
         act_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_avgs))
         act_abs_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_abs_avgs))
         act_nz_avgs_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in act_nz_avgs))
@@ -362,7 +399,9 @@ def do_eval(model):
 
 
         wt_fracs = []
-        for layer in model.network.lin_layers:
+        for tlayer in model.network.transformer_layers:
+        # for layer in model.network.lin_layers:
+            layer = tlayer.lin_layer
             weights = layer.weights_pos_neg.param[:layer.input_width, :] - layer.weights_pos_neg.param[
                                                                            layer.input_width:, :]
             # weights = layer.weights.param
@@ -373,18 +412,18 @@ def do_eval(model):
         # # for layer in networks[0].lin_layers:
         # #     scales.append(torch.mean(torch.abs(layer.scale) * layer.scale_factor))
         # # scales_fmt = '[{}]'.format(', '.join('{:.3f}'.format(f) for f in scales))
-        scales_fmt = '{:.3f}'.format(model.network.scale * model.network.scale_factor)
+        # scales_fmt = '{:.3f}'.format(model.network.scale * model.network.scale_factor)
 
         lr = optimizers[0].param_groups[0]['lr']
         beta = optimizers[0].param_groups[0]['betas'][0]
         logging.info(
-            "{}: train={:.6f}, test={:.6f}, acc={:.6f}, sc={}, wt={}, act={}, anz={}".format(
+            "{}: train={:.6f}, test={:.6f}, acc={:.6f}, wt={}, range={}, avg={}, nz={}".format(
                 iteration,
                 sum(fast_models[i].train_loss for i in range(num_fast_models)) / num_fast_models / batch_X.shape[0],
                 float(test_loss / test_X.shape[0]),
                 float(test_acc),
-                scales_fmt,
-                wt_fracs_fmt, act_abs_avgs_fmt, act_nz_avgs_fmt))
+                # scales_fmt,
+                wt_fracs_fmt, act_ranges_fmt, act_abs_avgs_fmt, act_nz_avgs_fmt))
         # logging.info(
         #     "{}: train={:.6f}, test={:.6f}, acc={:.6f}, sc={}, act={}".format(
         #         iteration,
@@ -394,6 +433,9 @@ def do_eval(model):
         #         scales_fmt,
         #         act_abs_avgs_fmt))
     return test_P
+
+# for layer in model.network.dropout_layers:
+#     layer.p = 0.01
 
 for model in fast_models:
     model.project()
@@ -410,21 +452,25 @@ for _ in range(1, 50001):
     scale_decay = frac * scale_decay1 + (1 - frac) * scale_decay0
     act_decay = frac * act_decay1 + (1 - frac) * act_decay0
     p = frac * p1 + (1 - frac) * p0
+    lin_eps = frac * lin_eps1 + (1 - frac) * lin_eps0
 
     for i, model in enumerate(fast_models):
         optimizers[i].param_groups[0]['lr'] = lr
         optimizers[i].param_groups[0]['betas'] = (beta, beta)
-        # for layer in model.network.act_layers:
-        #     layer.activity_lr = lr * 3.0
+        # # for layer in model.network.act_layers:
+        # #     layer.activity_lr = lr * 3.0
         # for layer in model.network.lin_layers:
+        #     # layer.weights.p = p
+        #     # layer.weights.eps = lin_eps
         #     layer.weights_pos_neg.p = p
         #     layer.weights_pos_neg.eps = lin_eps
-        #     layer.weights_pos_neg.num_iters = 12
+        # #     layer.weights_pos_neg.num_iters = 12
 
         # batch_ind = torch.randint(0, train_X.shape[0], [batch_size])
         # batch_X = preprocessor.augment(train_X[batch_ind, :])
         # # batch_X = train_X[batch_ind, :]
         # batch_Y = train_Y[batch_ind]
+        # batch_w = None
 
         batch_X, batch_Y, batch_w = sample_batch(batch_size, train_X_splits, train_Y_splits, balancing_exp)
 

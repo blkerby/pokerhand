@@ -7,7 +7,7 @@ import torch
 from typing import List
 import logging
 import math
-from high_order_act_pytorch import HighOrderActivation, HighOrderActivationB, high_order_act_b, cartesian_power
+from high_order_act_pytorch import HighOrderActivationA, HighOrderActivationB, high_order_act_b, cartesian_power
 import abc
 
 logging.basicConfig(format='%(asctime)s %(message)s',
@@ -279,6 +279,52 @@ class LpLinear(torch.nn.Module):
 
     def penalty(self):
         return 0.0
+
+    def project(self):
+        self.weights_pos_neg.project()
+
+
+class LpLinearPositive(torch.nn.Module):
+    def __init__(self, input_width, output_width,
+                 pen_coef=0.0, pen_exp=2.0,
+                 bias_factor=1.0,
+                 # scale_factor=1.0,
+                 noise_factor=0.0,
+                 eps=0.1,
+                 p=1.0,
+                 dtype=torch.float32, device=None,
+                 num_iters=6):
+        super().__init__()
+        self.input_width = input_width
+        self.output_width = output_width
+        self.pen_coef = pen_coef
+        self.pen_exp = pen_exp
+        self.bias_factor = bias_factor
+        self.noise_factor = noise_factor
+        self.p = p
+        self.eps = eps
+        # self.scale_factor = scale_factor
+        self.weights = LpSimplex([input_width, output_width], dim=0, p=p, eps=eps,
+                                         dtype=dtype, device=device,
+                                          num_iters=num_iters)
+
+        # self.active_input = torch.randint(0, input_width * 2, [output_width])
+        # self.weights_pos_neg.param.data[:, :] = 0.0
+        # self.weights_pos_neg.param.data[self.active_input, torch.arange(output_width)] = 1.0
+        self.bias = torch.nn.Parameter(torch.zeros([output_width], dtype=dtype, device=device))
+        # self.scale = torch.nn.Parameter(torch.ones([output_width], dtype=dtype, device=device))
+
+    # def forward(self, X, max_scale):
+    def forward(self, X):
+        assert X.shape[1] == self.input_width
+        return torch.matmul(X, self.weights.param) + self.bias.view(1, -1) * self.bias_factor
+
+    def penalty(self):
+        return 0.0
+
+    def project(self):
+        self.weights.project()
+
 
 class L1LinearScaled(ManifoldModule):
     def __init__(self, input_width, output_width,
@@ -1656,6 +1702,7 @@ class TameHighOrderActivationB(ManifoldModule):
         # self.params = torch.nn.Parameter(torch.rand([input_groups, 3 ** arity, out_dim]) * 2 - 1)
         self.params = torch.nn.Parameter(torch.randint(0, 2, [input_groups, 3 ** arity, out_dim]).to(torch.float32) * 2 - 1)
         self.params.data[:, (3 ** arity - 1) // 2, :] = 0.0
+        self.edge_tensor_pairs = self._compute_neighbor_graph()
         # self.activity_grad_ma = torch.zeros_like(self.params)
         # self.activity_momentum = activity_momentum
         # self.activity_lr = activity_lr
@@ -1722,7 +1769,7 @@ class TameHighOrderActivationB(ManifoldModule):
         """This "projects" the parameters onto the feasible set (ensuring tameness), but it's not the Euclidean
         projection."""
         remaining_var = torch.full_like(self.params, 1.0 / self.act_factor)
-        edge_tensor_pairs = self._compute_neighbor_graph()
+        edge_tensor_pairs = self.edge_tensor_pairs
         self.params.data = torch.clamp(self.params.data, min=-1.0 / self.act_factor, max=1.0 / self.act_factor)
         for num_zeros in range(1, self.arity + 1):
             parent_ids, child_ids = edge_tensor_pairs[num_zeros]
@@ -1764,6 +1811,138 @@ class TameHighOrderActivationB(ManifoldModule):
 # self.project()
 # print(self.params, self._compute_activity())
 
+
+class TameCornerActivationB(ManifoldModule):
+    def __init__(self, arity, input_groups, out_dim, act_init=1.0, act_factor=1.0):
+        super().__init__()
+        self.arity = arity
+        self.input_groups = input_groups
+        self.out_dim = out_dim
+        self.act_factor = act_factor
+        r = torch.randint(2, [input_groups, 2 ** arity, out_dim])
+        self.params = torch.nn.Parameter((r * 2 - 1).to(torch.float32) * act_init / act_factor)
+        # self.params = torch.nn.Parameter(torch.full([input_groups, 2 ** arity, out_dim], -act_init / act_factor))
+        # self.params.data[:, 2 ** arity - 1, :] = act_init / act_factor
+        self.edge_tensor_pairs = self._compute_neighbor_graph()
+
+    def _compute_vertex_id(self, x):
+        return torch.sum((x + 1) * 3 ** torch.arange(self.arity)).to(torch.long)
+
+    def _compute_neighbor_graph(self):
+        param_coords = cartesian_power([-1.0, 0.0, 1.0], self.arity, dtype=torch.float32)
+        out_tensor_pairs = []
+        for num_zeros in range(self.arity + 1):
+            parent_vertices = param_coords[torch.sum(param_coords == 0.0, dim=1) == num_zeros]
+            parent_ids_list = []
+            child_ids_list_list = []
+            for i in range(parent_vertices.shape[0]):
+                parent_vertex = parent_vertices[i, :]
+                parent_id = self._compute_vertex_id(parent_vertex)
+                parent_ids_list.append(parent_id)
+                child_ids_list = []
+                for j in range(self.arity):
+                    if parent_vertex[j] == 0.0:
+                        child_vertex = parent_vertex.clone()
+                        child_vertex[j] = 1.0
+                        child_id = self._compute_vertex_id(child_vertex)
+                        child_ids_list.append(child_id)
+
+                        child_vertex[j] = -1.0
+                        child_id = self._compute_vertex_id(child_vertex)
+                        child_ids_list.append(child_id)
+                child_ids_list_list.append(child_ids_list)
+            parent_ids_tensor = torch.tensor(parent_ids_list, dtype=torch.long)
+            child_ids_tensor = torch.tensor(child_ids_list_list, dtype=torch.long)
+            out_tensor_pairs.append((parent_ids_tensor, child_ids_tensor))
+        return out_tensor_pairs
+
+
+    def _compute_activity(self, params):
+        activity = torch.zeros_like(params)
+        edge_tensor_pairs = self._compute_neighbor_graph()
+        for num_zeros in range(1, self.arity + 1):
+            parent_ids, child_ids = edge_tensor_pairs[num_zeros]
+            parent_params = params[:, parent_ids, :]
+            child_params = params[:, child_ids, :]
+            child_activity = activity[:, child_ids, :]
+            activity[:, parent_ids, :] = torch.max(torch.abs(parent_params.unsqueeze(2) - child_params) + child_activity, dim=2)[0]
+        return activity[:, (3 ** self.arity - 1) // 2, :]
+
+    def _create_expanded_params(self):
+        edge_tensor_pairs = self.edge_tensor_pairs
+
+        # TODO: simplify this:
+        params = self.params
+        for i in range(self.arity):
+            shape0 = 3 ** i
+            shape1 = 2 ** (self.arity - i - 1)
+            param_view = params.view(self.input_groups, shape0, 2, shape1, self.out_dim)
+            params = torch.stack([
+                param_view[:, :, 0, :, :],
+                (param_view[:, :, 0, :, :] + param_view[:, :, 1, :, :]) / 2,
+                param_view[:, :, 1, :, :],
+            ], dim=2)
+        params = params.view(self.input_groups, 3 ** self.arity, self.out_dim)
+
+        remaining_var = torch.full_like(params, 1.0 / self.act_factor)
+        for num_zeros in range(1, self.arity + 1):
+            parent_ids, child_ids = edge_tensor_pairs[num_zeros]
+            child_params = params[:, child_ids, :]
+            child_var = remaining_var[:, child_ids, :]
+            upper_lim = torch.min(child_params + child_var, dim=2)[0] / 2.0
+            lower_lim = torch.max(child_params - child_var, dim=2)[0] / 2.0
+            new_parent_params = (upper_lim + lower_lim) #/ 2.0
+            parent_var = torch.min(child_var - torch.abs(new_parent_params.unsqueeze(2) - child_params), dim=2)[0]
+            params.data[:, parent_ids, :] = new_parent_params
+            remaining_var[:, parent_ids, :] = parent_var
+        return params
+
+    def forward(self, X):
+        assert len(X.shape) == 2
+        assert X.shape[1] == self.input_groups * self.arity
+        X1 = X.view(X.shape[0], self.input_groups, self.arity)
+
+        expanded_params = self._create_expanded_params()
+        out1 = high_order_act_b(X1, expanded_params)
+        out = out1.view(X.shape[0], self.input_groups * self.out_dim) * self.act_factor
+        self.out = out
+        return out
+
+    def project(self):
+        a = 1 / self.act_factor
+        self.params.data = torch.clamp(self.params.data, min=-a, max=a)
+
+    def penalty(self):
+        return 0.0
+
+
+class NonnegativeHighOrderActivationB(torch.nn.Module):
+    # not tame
+    def __init__(self, arity, input_groups, out_dim, act_init=1.0, act_factor=1.0):
+        super().__init__()
+        self.arity = arity
+        self.input_groups = input_groups
+        self.out_dim = out_dim
+        self.act_factor = act_factor
+        self.params = torch.nn.Parameter(torch.randn([input_groups, 3 ** arity, out_dim]))
+        param_coords = cartesian_power([-1.0, 0.0, 1.0], arity, dtype=torch.float32)
+        self.params.data[:, :, :] = torch.max(param_coords, dim=1)[0].view(1, 3 ** arity, 1) * act_init / act_factor  # Initialize as maxout
+        self.valency = self.arity + torch.sum((param_coords == 0.0).to(torch.float32), dim=1)  # Number of neighbors of each parameter
+
+    def forward(self, X):
+        assert len(X.shape) == 2
+        assert X.shape[1] == self.input_groups * self.arity
+        X1 = X.view(X.shape[0], self.input_groups, self.arity)
+        out1 = high_order_act_b(X1, self.params)
+        out = out1.view(X.shape[0], self.input_groups * self.out_dim) * self.act_factor
+        self.out = out
+        return out
+
+    def penalty(self):
+        return 0.0
+
+    def project(self):
+        self.params.data = torch.clamp(self.params.data, min=0.0)
 
 
 class L2Linear(ManifoldModule):
@@ -1815,10 +1994,47 @@ class MonotonePiecewiseLinear(ManifoldModule):
         self.slope.data = torch.clamp(self.slope.data, min=0.0, max=1.0)
 
 
+class MaxTransformer(ManifoldModule):
+    def __init__(self, cell_in_width, cell_out_width, arity,
+                 bias_factor=1.0,
+                 dtype=torch.float32, device=None):
+        super().__init__()
+        self.cell_in_width = cell_in_width
+        self.cell_out_width = cell_out_width
+        self.arity = arity
+        self.lin_layer = L1Linear(2 * cell_in_width + 1, cell_out_width * arity,
+                                  bias_factor=bias_factor,
+                                  dtype=dtype, device=device)
+        self.act_layer = HighOrderActivationA(arity, cell_out_width, 1)
+        # self.act_layer = HighOrderActivationB(arity, cell_out_width, 1)
+
+    def forward(self, X):
+        batch_size = X.shape[0]
+        num_cells = X.shape[1]
+        assert X.shape[2] == self.cell_in_width
+        X_row = X.view(batch_size, 1, num_cells, self.cell_in_width).repeat(1, num_cells, 1, 1)
+        X_col = X.view(batch_size, num_cells, 1, self.cell_in_width).repeat(1, 1, num_cells, 1)
+        X_rel = torch.eye(num_cells, dtype=X.dtype, device=X.device).view(1, num_cells, num_cells, 1).repeat(batch_size, 1, 1, 1)
+        X_cat = torch.cat([X_row, X_col, X_rel], dim=3)
+        X_cat_flat = X_cat.view(batch_size * num_cells * num_cells, 2 * self.cell_in_width + 1)
+        Z_flat = self.lin_layer(X_cat_flat)
+        Y_flat = self.act_layer(Z_flat)
+        Y = Y_flat.view(batch_size, num_cells, num_cells, self.cell_out_width)
+        Y_max = torch.max(Y, dim=2)[0]
+        return Y_max
+
+    def project(self):
+        self.lin_layer.project()
+        # self.act_layer.project()
+
+# batch_size = 6
+# num_cells = 5
+# self = MaxTransformer(3, 4, 2)
+# X = torch.rand([batch_size, num_cells, 3])
+# Y = self(X)
+# print(Y)
 #
-# self = MonotonePiecewiseLinear(3, 2, 1.0)
-# X = (torch.arange(30, dtype=torch.float32) / 10).view(3, -1).t()
-# self(X)
+# # self(X)
 
 class Network(ManifoldModule):
     def __init__(self,
@@ -1829,6 +2045,7 @@ class Network(ManifoldModule):
                  scale_factor: float = 1.0,
                  scale_init: float = 1.0,
                  arity: int = 2,
+                 # dropout_p: float = 0.0,
                  dtype=torch.float32,
                  device=None):
         super().__init__()
@@ -1838,8 +2055,9 @@ class Network(ManifoldModule):
         self.scale_factor = scale_factor
         self.lin_layers = torch.nn.ModuleList([])
         self.act_layers = torch.nn.ModuleList([])
+        # self.dropout_layers = torch.nn.ModuleList([])
         # self.mono_layers = torch.nn.ModuleList([])
-        self.scale_layers = torch.nn.ModuleList([])
+        # self.scale_layers = torch.nn.ModuleList([])
         # self.sparsifier_layers = torch.nn.ModuleList([])
         # self.scale = torch.nn.Parameter(torch.full([widths[-1]], scale_init / scale_factor, dtype=dtype, device=device))
         self.scale = torch.nn.Parameter(torch.full([], scale_init / scale_factor, dtype=dtype, device=device))
@@ -1851,8 +2069,8 @@ class Network(ManifoldModule):
                 #                                 dtype=dtype, device=device))
                 # self.act_layers.append(ReLU())
 
-                # self.lin_layers.append(L1LinearScaled(widths[i], widths[i + 1] * arity,
-                self.lin_layers.append(L1Linear(widths[i], widths[i + 1] * arity,
+                self.lin_layers.append(L1LinearScaled(widths[i], widths[i + 1] * arity,
+                # self.lin_layers.append(L1Linear(widths[i], widths[i + 1] * arity,
                                                 bias_factor=bias_factor,
                                                 dtype=dtype, device=device))
                 # self.lin_layers.append(L1LinearSticky(widths[i], widths[i + 1] * arity,
@@ -1865,7 +2083,8 @@ class Network(ManifoldModule):
                 #                                 bias_factor=bias_factor,
                 #                                 dtype=dtype, device=device))
                 # self.lin_layers.append(LpLinear(widths[i], widths[i + 1] * arity,
-                #                                 bias_factor=bias_factor,
+                # # self.lin_layers.append(LpLinearPositive(widths[i], widths[i + 1] * arity,
+                #                             bias_factor=bias_factor,
                 #                                 eps=0.1, p=1.0,
                 #                                 dtype=dtype, device=device,
                 #                                 num_iters=6))
@@ -1899,12 +2118,14 @@ class Network(ManifoldModule):
                 # self.act_layers.append(ClampedMinOut(arity=arity, target_act=target_act, pen_act=pen_act))
                 # self.act_layers.append(GateAbsActivation(widths[i + 1], pen_act=pen_act))
                 # self.act_layers.append(CoherentSignActivation(widths[i + 1], target_act=target_act, pen_act=pen_act))
-                # self.act_layers.append(HighOrderActivation(arity, widths[i + 1], 1))
-                # self.act_layers.append(HighOrderActivation(arity, widths[i + 1] // arity, arity))
+                # self.act_layers.append(HighOrderActivationA(arity, widths[i + 1], 1))
+                # self.act_layers.append(HighOrderActivationA(arity, widths[i + 1] // arity, arity))
                 # self.act_layers.append(HighOrderActivationB(arity, widths[i + 1] // arity, arity))
                 # self.act_layers.append(HighOrderActivationB(arity, widths[i + 1], 1, act_init=act_init, act_factor=act_factor))
+                # self.act_layers.append(NonnegativeHighOrderActivationB(arity, widths[i + 1], 1, act_init=act_init, act_factor=act_factor))
                 self.act_layers.append(CornerActivationB(arity, widths[i + 1], 1, act_init=act_init, act_factor=act_factor))
                 # self.act_layers.append(CornerActivationB(arity, widths[i + 1] // arity, arity, act_init=act_init, act_factor=act_factor))
+                # self.act_layers.append(TameCornerActivationB(arity, widths[i + 1], 1, act_init=act_init, act_factor=act_factor))
                 # self.act_layers.append(TameHighOrderActivationA(arity, widths[i + 1], 1))
                 # self.act_layers.append(TameHighOrderActivationB(arity, widths[i + 1], 1, act_factor=act_factor))
                 # self.act_layers.append(TameHighOrderActivationB(arity, widths[i + 1] // arity, arity, act_factor=act_factor))
@@ -1919,7 +2140,7 @@ class Network(ManifoldModule):
                 # self.act_layers.append(RestrictedHighOrderActivationA(arity, widths[i + 1], 1))
                 # self.act_layers.append(RestrictedHighOrderActivationB(arity, widths[i + 1], 1))
                 # self.mono_layers.append(MonotonePiecewiseLinear(widths[i + 1], 20, 1.0))
-                self.scale_layers.append(Scaling(widths[i + 1]))
+                # self.scale_layers.append(Scaling(widths[i + 1]))
         # else:
         # #         # self.lin_layers.append(LpLinear(widths[i], widths[i + 1],
         # #         #                                 bias_factor=bias_factor,
@@ -1932,6 +2153,8 @@ class Network(ManifoldModule):
         #     self.lin_layers.append(L2Linear(widths[i], widths[i + 1],  # * arity,
         #                                         bias_factor=bias_factor,
         #                                         dtype=dtype, device=device))
+        #         if i != self.depth - 1:
+        #             self.dropout_layers.append(torch.nn.Dropout(p=dropout_p))
 
     def forward(self, X):
         self.cnt_rows = X.shape[0]
@@ -1943,8 +2166,10 @@ class Network(ManifoldModule):
             # X = self.lin_layers[i](X, layer_scale)
             # if i != self.depth - 1:
             X = self.act_layers[i](X)
+            # if i != self.depth - 1:
+            #     X = self.dropout_layers[i](X)
             # X = self.mono_layers[i](X)
-            X = self.scale_layers[i](X)
+            # X = self.scale_layers[i](X)
         out = X + self.bias.unsqueeze(0)
         return out
 
@@ -1961,5 +2186,35 @@ class Network(ManifoldModule):
             layer.project()
         # for layer in self.mono_layers:
         #     layer.project()
-        # for layer in self.act_layers:
-        #     layer.project()
+        for layer in self.act_layers:
+            layer.project()
+
+class TransformerNetwork(ManifoldModule):
+    def __init__(self,
+                 widths: List[int],
+                 arity: int = 2,
+                 # dropout_p: float = 0.0,
+                 dtype=torch.float32,
+                 device=None):
+        super().__init__()
+        self.widths = widths
+        self.depth = len(widths) - 1
+        self.transformer_layers = torch.nn.ModuleList([])
+        self.bias = torch.nn.Parameter(torch.zeros([widths[-1]], dtype=dtype, device=device))
+        for i in range(self.depth):
+            self.transformer_layers.append(MaxTransformer(widths[i], widths[i + 1], arity))
+
+    def forward(self, X):
+        X = X.view(X.shape[0], -1, self.widths[0])
+        for i in range(self.depth):
+            X = self.transformer_layers[i](X)
+        X = torch.max(X, dim=1)[0]
+        out = X + self.bias.unsqueeze(0)
+        return out
+
+    def penalty(self):
+        return 0.0
+
+    def project(self):
+        for layer in self.transformer_layers:
+            layer.project()
